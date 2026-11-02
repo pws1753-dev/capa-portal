@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import type { Request, Response, NextFunction } from "express";
 import { getEnv } from "../config/env";
 import { httpError } from "../utils/http";
@@ -17,7 +18,8 @@ export function requireCronAuth(req: Request, _res: Response, next: NextFunction
   const bearerSecret = authHeader?.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
   const provided = (typeof headerSecret === "string" ? headerSecret.trim() : null) || bearerSecret;
 
-  if (!provided || provided !== secret) {
+  const matches = provided !== null && provided.length === secret.length && timingSafeEqual(Buffer.from(provided), Buffer.from(secret));
+  if (!matches) {
     throw httpError(401, "Unauthorized cron execution");
   }
 
