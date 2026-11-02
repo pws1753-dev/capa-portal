@@ -19,9 +19,9 @@ export type EscalationRunResult = {
 const unique = (emails: string[]) => Array.from(new Set(emails.map((email) => email.trim().toLowerCase()).filter(Boolean)));
 
 /**
- * Daily reminders for delayed work.
+ * Reminders for delayed work. The cron gate (Escalation Rules tab) runs this once per interval, weekly by default.
  *
- * Every day a complaint has a delayed TAT stage (Acknowledgement, Containment, RCA Completion or
+ * Each run, for a complaint with a delayed TAT stage (Acknowledgement, Containment, RCA Completion or
  * CAPA Assignment that is incomplete and past its due date) its owner gets one email listing all
  * four stages, until they are completed. The copy list is the common mailboxes plus the department's
  * Manager and HOD. Management level people are added only once a delay is more than 10 days.
@@ -108,6 +108,7 @@ export async function processEscalations(): Promise<EscalationRunResult> {
       excludeManagement: !includeManagement,
       dedupeKey: `TATDELAY_${complaint._id}_${todayStr}`,
       relatedComplaintId: complaint._id,
+      automated: { daysDelayed: Math.floor(maxOverdueHours / 24) },
       data: {
         statusLabel: includeManagement ? "ESCALATED" : "Delayed",
         complaintNumber: complaint.number,
@@ -159,6 +160,7 @@ export async function processEscalations(): Promise<EscalationRunResult> {
         excludeManagement: !includeManagement,
         dedupeKey,
         relatedCapaId: capa._id,
+        automated: { daysDelayed: Math.floor((now.getTime() - targetDate.getTime()) / 86400000) },
         data: {
           capaNumber: capa.number,
           assignedTo: (capa.owner as { name?: string })?.name || "CAPA Owner",

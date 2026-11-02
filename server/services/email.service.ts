@@ -6,7 +6,10 @@ import { COMMON_CC_EMAILS, EXTERNAL_ADDRESS_MESSAGE, excludesManagementByDefault
 import { createTransporter, fromAddress, isSmtpConfigured } from "../lib/mailer";
 import { resolveDepartmentCc, resolveRecipientChainCc } from "./email-recipient.service";
 import { getActiveTemplateByTrigger } from "./email-template.service";
-import { hasDedupeKeyBeenSent, writeEmailLog, getEmailLogById } from "./email-log.service";
+import { hasDedupeKeyBeenSent, writeEmailLog, getEmailLogById, getThreadHistory } from "./email-log.service";
+import { applyReminderBanner, buildReminderBanner, nextReminderCount, threadSubject } from "../domain/email-thread";
+import { Capa } from "../models/Capa";
+import { randomUUID } from "node:crypto";
 import { EmailLog } from "../models/EmailLog";
 import { httpError } from "../utils/http";
 
@@ -25,6 +28,12 @@ export type SendTemplatedEmailInput = {
    * added). When not given, reminders about delay leave them out and every other email keeps them.
    */
   excludeManagement?: boolean;
+  /**
+   * Marks an automated reminder/escalation. It is numbered within the complaint's thread and shows the
+   * reminder count and the days delayed (0 = not yet late). Every email about a complaint or its CAPAs
+   * joins one thread; only these are counted as reminders.
+   */
+  automated?: { daysDelayed: number };
 };
 
 export type SendEmailResult = {
@@ -72,6 +81,18 @@ async function recordBlockedAddresses(input: SendTemplatedEmailInput, blocked: s
     relatedCapaId: input.relatedCapaId,
     sentBySystem: input.sentBySystem !== undefined ? input.sentBySystem : true
   }).catch(() => undefined);
+}
+
+async function resolveThreadKey(complaintId?: string | Types.ObjectId, capaId?: string | Types.ObjectId): Promise<string | undefined> {
+  if (complaintId) return `CMP_${String(complaintId)}`;
+  if (!capaId) return undefined;
+  const capa = await Capa.findById(capaId).select("complaint").lean().catch(() => null);
+  return capa?.complaint ? `CMP_${String(capa.complaint)}` : `CAPA_${String(capaId)}`;
+}
+
+function newMessageId(): string {
+  const domain = /@([^>\s]+)>?$/.exec(fromAddress())?.[1] ?? "onepws.com";
+  return `<${randomUUID()}@${domain}>`;
 }
 
 export async function sendTemplatedEmail(input: SendTemplatedEmailInput): Promise<SendEmailResult> {
@@ -168,10 +189,37 @@ export async function sendTemplatedEmail(input: SendTemplatedEmailInput): Promis
     ...normalizedInputData
   };
 
-  const renderedSubject = renderTemplate(template.subject, mergedData).rendered;
+  let renderedSubject = renderTemplate(template.subject, mergedData).rendered;
   const renderedHtml = renderTemplate(template.htmlBody, mergedData).rendered;
   const renderedText = renderTemplate(template.textBody, mergedData).rendered;
-  const finalBody = appendTemporaryPasswordNotice(renderedHtml, renderedText, mergedData);
+  let finalBody = appendTemporaryPasswordNotice(renderedHtml, renderedText, mergedData);
+
+  // One thread per complaint: every email about it, or about one of its CAPAs, replies to the first one,
+  // so a reader sees all earlier reminders in a single conversation.
+  const threadKey = await resolveThreadKey(input.relatedComplaintId, input.relatedCapaId);
+  const history = threadKey ? await getThreadHistory(threadKey).catch(() => []) : [];
+  const root = history[0];
+  let reminderCount: number | undefined;
+  if (root) renderedSubject = threadSubject(root.subject || renderedSubject);
+  if (input.automated) {
+    reminderCount = nextReminderCount(history);
+    const banner = buildReminderBanner({ reminderCount, daysDelayed: input.automated.daysDelayed, prior: history });
+    finalBody = applyReminderBanner(finalBody, banner);
+    mergedData.reminderCount = reminderCount;
+    mergedData.daysDelayed = input.automated.daysDelayed;
+  }
+  const messageId = threadKey ? newMessageId() : undefined;
+  const threadHeaders =
+    threadKey && root
+      ? { inReplyTo: root.messageId as string, references: history.slice(-20).map((entry) => entry.messageId as string) }
+      : {};
+  const threadFields = {
+    threadKey,
+    messageId,
+    automated: Boolean(input.automated),
+    reminderCount,
+    daysDelayed: input.automated?.daysDelayed
+  };
 
   if (!isSmtpConfigured()) {
     const skippedLog = await writeEmailLog({
@@ -201,7 +249,9 @@ export async function sendTemplatedEmail(input: SendTemplatedEmailInput): Promis
       bcc: input.bcc && input.bcc.length > 0 ? input.bcc : undefined,
       subject: renderedSubject,
       html: finalBody.html,
-      text: finalBody.text
+      text: finalBody.text,
+      ...(messageId ? { messageId } : {}),
+      ...threadHeaders
     });
 
     const sentLog = await writeEmailLog({
@@ -215,7 +265,8 @@ export async function sendTemplatedEmail(input: SendTemplatedEmailInput): Promis
       relatedComplaintId: input.relatedComplaintId,
       relatedCapaId: input.relatedCapaId,
       dedupeKey: input.dedupeKey,
-      sentBySystem: input.sentBySystem !== undefined ? input.sentBySystem : true
+      sentBySystem: input.sentBySystem !== undefined ? input.sentBySystem : true,
+      ...threadFields
     });
 
     return { status: "sent", logId: String(sentLog._id) };

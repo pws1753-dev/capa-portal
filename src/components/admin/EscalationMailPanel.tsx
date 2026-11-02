@@ -203,11 +203,11 @@ export function EscalationMailPanel() {
         <div className="mt-6 rounded-lg border border-slate-100 bg-slate-50/80 p-4">
           <div className="flex items-center gap-2">
             <ShieldAlert className="h-4 w-4 text-brand-red" />
-            <h4 className="text-xs font-bold text-slate-700">Pre-Overdue Milestone Reminders</h4>
+            <h4 className="text-xs font-bold text-slate-700">Due-Date Reminder &amp; Email Thread</h4>
           </div>
           <p className="mt-1 text-xs text-slate-500">
-            Reminders are automatically sent to the Complaint/CAPA Owner at{" "}
-            <strong>{(config?.reminderPercentages || [50, 75, 90]).join("%, ")}%</strong> of allowed turnaround time to prevent SLA breaches.
+            The Complaint/CAPA Owner gets one reminder <strong>1 day before the due date</strong>. After that, overdue reminders go out{" "}
+            <strong>{frequencyDays === 7 ? "every Monday morning" : `every ${frequencyDays} day(s)`}</strong> in the same email thread, each showing the reminder count and days delayed.
           </p>
         </div>
 

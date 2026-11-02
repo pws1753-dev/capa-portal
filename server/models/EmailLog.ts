@@ -20,7 +20,14 @@ const EmailLogSchema = new Schema(
     sentBySystem: { type: Boolean, default: true },
     payload: { type: Schema.Types.Mixed }, // Safe context for retry, NEVER credentials
     dedupeKey: { type: String, sparse: true, index: true },
-    attemptCount: { type: Number, default: 1 }
+    attemptCount: { type: Number, default: 1 },
+    /** One thread per complaint (CAPA emails join their complaint's thread). */
+    threadKey: { type: String, index: true },
+    messageId: { type: String },
+    /** True for automated reminder/escalation emails, which are numbered within the thread. */
+    automated: { type: Boolean, default: false },
+    reminderCount: { type: Number },
+    daysDelayed: { type: Number }
   },
   { timestamps: true }
 );

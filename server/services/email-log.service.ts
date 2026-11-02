@@ -19,6 +19,11 @@ export type WriteEmailLogInput = {
   payload?: Record<string, unknown>;
   dedupeKey?: string;
   attemptCount?: number;
+  threadKey?: string;
+  messageId?: string;
+  automated?: boolean;
+  reminderCount?: number;
+  daysDelayed?: number;
 };
 
 /**
@@ -57,8 +62,22 @@ export async function writeEmailLog(input: WriteEmailLogInput): Promise<EmailLog
     sentBySystem: input.sentBySystem !== undefined ? input.sentBySystem : true,
     payload: sanitizePayload(input.payload),
     dedupeKey: input.dedupeKey,
-    attemptCount: input.attemptCount || 1
+    attemptCount: input.attemptCount || 1,
+    threadKey: input.threadKey,
+    messageId: input.messageId,
+    automated: input.automated ?? false,
+    reminderCount: input.reminderCount,
+    daysDelayed: input.daysDelayed
   });
+}
+
+/** Earlier sent emails of a thread, oldest first. The first is the thread root. */
+export async function getThreadHistory(threadKey: string) {
+  await connectDB();
+  return EmailLog.find({ threadKey, status: "sent", messageId: { $exists: true, $ne: null } })
+    .sort({ createdAt: 1 })
+    .select("subject messageId triggerEvent createdAt automated reminderCount daysDelayed")
+    .lean();
 }
 
 export async function hasDedupeKeyBeenSent(dedupeKey: string): Promise<boolean> {

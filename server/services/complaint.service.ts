@@ -210,6 +210,7 @@ export async function createComplaint(input: ComplaintCreateInput, user: ApiUser
       triggerEvent: "COMPLAINT_CREATED",
       recipients: emailRecipients,
       cc,
+      dedupeKey: `COMPLAINT_CREATED_${doc._id}`,
       relatedComplaintId: doc._id,
       data: {
         recipientName: ownerEmployee?.name ?? ownerUser?.name ?? "Complaint Owner",

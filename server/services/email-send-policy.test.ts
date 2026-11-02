@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-type Mail = { to: string[]; cc?: string[]; bcc?: string[] };
+type Mail = { to: string[]; cc?: string[]; bcc?: string[]; [key: string]: unknown };
 const sendMail = vi.fn(async (_mail: Mail) => ({ messageId: "m1" }));
 const writeEmailLog = vi.fn(async (entry: Record<string, unknown>) => ({ _id: "log1", ...entry }));
 const resolveDepartmentCc = vi.fn(async (_ref: { excludeManagement?: boolean }) => [] as string[]);
 const resolveRecipientChainCc = vi.fn(async () => [] as string[]);
+const getThreadHistory = vi.fn(async (_key: string) => [] as Record<string, unknown>[]);
 
 vi.mock("../lib/mailer", () => ({
   createTransporter: () => ({ sendMail }),
@@ -25,8 +26,10 @@ vi.mock("./email-template.service", () => ({
 vi.mock("./email-log.service", () => ({
   hasDedupeKeyBeenSent: async () => false,
   writeEmailLog,
-  getEmailLogById: async () => null
+  getEmailLogById: async () => null,
+  getThreadHistory
 }));
+vi.mock("../models/Capa", () => ({ Capa: { findById: () => ({ select: () => ({ lean: async () => null }) }) } }));
 vi.mock("./email-recipient.service", () => ({ resolveDepartmentCc, resolveRecipientChainCc }));
 vi.mock("../models/EmailLog", () => ({ EmailLog: { findByIdAndUpdate: async () => null } }));
 
@@ -38,6 +41,8 @@ const COMMON = ["service@onepws.com", "jatin.chouhan@onepws.com", "process@onepw
 beforeEach(() => {
   sendMail.mockClear();
   writeEmailLog.mockClear();
+  getThreadHistory.mockReset();
+  getThreadHistory.mockResolvedValue([]);
   resolveDepartmentCc.mockResolvedValue([]);
   resolveRecipientChainCc.mockResolvedValue([]);
 });
@@ -124,5 +129,37 @@ describe("portal emails never leave the company", () => {
     const result = await sendTemplatedEmail({ ...base, recipients: ["x@onepws.com.evil.com", "y@notonepws.com"] });
     expect(result.status).toBe("skipped");
     expect(sendMail).not.toHaveBeenCalled();
+  });
+});
+
+describe("one email thread per complaint", () => {
+  it("starts the thread with its own Message-ID and no reply headers", async () => {
+    await sendTemplatedEmail({ ...base, recipients: ["owner@onepws.com"] });
+    const mail = sendMail.mock.calls[0][0] as Record<string, unknown>;
+    expect(String(mail.messageId)).toMatch(/^<.+@onepws\.com>$/);
+    expect(mail.inReplyTo).toBeUndefined();
+    expect(writeEmailLog).toHaveBeenCalledWith(expect.objectContaining({ threadKey: "CMP_6ae076b3a20125450b25cdb0" }));
+  });
+
+  it("replies to the root, keeps the subject, and numbers the reminder with days delayed", async () => {
+    const day = new Date("2026-11-02T03:00:00Z");
+    getThreadHistory.mockResolvedValue([
+      { subject: "Complaint PWS-1", messageId: "<root@onepws.com>", triggerEvent: "TAT_REMINDER", createdAt: day, automated: true, reminderCount: 1, daysDelayed: 0 },
+      { subject: "Re: Complaint PWS-1", messageId: "<two@onepws.com>", triggerEvent: "TAT_DELAY_DAILY", createdAt: day, automated: true, reminderCount: 2, daysDelayed: 3 }
+    ]);
+    await sendTemplatedEmail({ ...base, triggerEvent: "TAT_DELAY_DAILY", recipients: ["owner@onepws.com"], automated: { daysDelayed: 10 } });
+    const mail = sendMail.mock.calls[0][0] as Record<string, unknown>;
+    expect(mail.subject).toBe("Re: Complaint PWS-1");
+    expect(mail.inReplyTo).toBe("<root@onepws.com>");
+    expect(mail.references).toEqual(["<root@onepws.com>", "<two@onepws.com>"]);
+    expect(String(mail.html)).toContain("Reminder #3");
+    expect(String(mail.html)).toContain("10 days delayed");
+    expect(writeEmailLog).toHaveBeenCalledWith(expect.objectContaining({ automated: true, reminderCount: 3, daysDelayed: 10 }));
+  });
+
+  it("does not count a non-reminder email as a reminder", async () => {
+    getThreadHistory.mockResolvedValue([{ subject: "Complaint PWS-1", messageId: "<root@onepws.com>", triggerEvent: "COMPLAINT_REGISTERED", createdAt: new Date(), automated: false }]);
+    await sendTemplatedEmail({ ...base, recipients: ["owner@onepws.com"], automated: { daysDelayed: 0 } });
+    expect(String((sendMail.mock.calls[0][0] as Record<string, unknown>).html)).toContain("Reminder #1");
   });
 });
