@@ -157,7 +157,8 @@ export async function sendTemplatedEmail(input: SendTemplatedEmailInput): Promis
   // Department-specific emails always CC the Manager and HOD addresses kept in Master Data > Employees.
   // Management level people are copied on every complaint/CAPA email except reminders about delay,
   // where a sender adds them only after 10 days (excludeManagement: false).
-  const excludeManagement = input.excludeManagement ?? excludesManagementByDefault(input.triggerEvent);
+  // Automated reminders/escalations never copy Management (it gets the monthly summary only).
+  const excludeManagement = input.automated ? true : (input.excludeManagement ?? excludesManagementByDefault(input.triggerEvent));
   const departmentCc = await resolveDepartmentCc({
     complaintId: input.relatedComplaintId,
     capaId: input.relatedCapaId,

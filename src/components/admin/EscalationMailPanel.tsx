@@ -174,7 +174,7 @@ export function EscalationMailPanel() {
             Escalation Chain &amp; Recipient Hierarchy
           </h3>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {levels.map((lvl) => (
+            {levels.filter((lvl) => !/management/i.test(lvl.name)).map((lvl) => (
               <div
                 key={lvl.level}
                 className="relative flex flex-col justify-between rounded-lg border border-slate-200 bg-slate-50/50 p-4 transition hover:border-slate-300"

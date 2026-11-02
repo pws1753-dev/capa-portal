@@ -2,9 +2,9 @@ import { connectDB } from "../config/db";
 import { Complaint } from "../models/Complaint";
 import { Capa } from "../models/Capa";
 import { TATConfiguration } from "../models/configuration";
-import { DEFAULT_TAT_CONFIG, MANAGEMENT_ESCALATION_DAYS } from "@shared/constants/domain";
+import { DEFAULT_TAT_CONFIG } from "@shared/constants/domain";
 import { computeStageDueDates } from "../domain/tat";
-import { lateText, needsManagementEscalation, stageDelays, stageStatusText } from "../domain/tat-delay";
+import { lateText, stageDelays, stageStatusText } from "../domain/tat-delay";
 import { COMMON_CC_EMAILS } from "../lib/email-policy";
 import { resolveRecipients } from "./email-recipient.service";
 import { sendTemplatedEmail } from "./email.service";
@@ -24,7 +24,7 @@ const unique = (emails: string[]) => Array.from(new Set(emails.map((email) => em
  * Each run, for a complaint with a delayed TAT stage (Acknowledgement, Containment, RCA Completion or
  * CAPA Assignment that is incomplete and past its due date) its owner gets one email listing all
  * four stages, until they are completed. The copy list is the common mailboxes plus the department's
- * Manager and HOD. Management level people are added only once a delay is more than 10 days.
+ * Manager and HOD. Management is never copied; it gets only the monthly summary.
  */
 export async function processEscalations(): Promise<EscalationRunResult> {
   await connectDB();
@@ -69,7 +69,6 @@ export async function processEscalations(): Promise<EscalationRunResult> {
     if (delayed.length === 0) continue; // nothing is late, or every late stage has been completed
 
     const maxOverdueHours = Math.max(...delayed.map((entry) => entry.overdueHours));
-    const includeManagement = needsManagementEscalation(maxOverdueHours);
 
     // To: the people who have to act. The complaint owner always; for a late CAPA Assignment also the
     // owners of the complaint's open CAPA actions.
@@ -87,11 +86,8 @@ export async function processEscalations(): Promise<EscalationRunResult> {
     }
 
     // CC: the common mailboxes (the department Manager and HOD are added by the mail service). Management
-    // level people join only beyond ten days.
+    // is never copied on reminders; it receives only the monthly summary report.
     let cc = [...COMMON_CC_EMAILS];
-    if (includeManagement) {
-      cc = cc.concat(await resolveRecipients({ complaintId: complaint._id, targetRoles: ["Management"] }));
-    }
 
     // A complaint with no reachable owner still has to be chased: the common mailboxes become the recipients.
     to = unique(to);
@@ -105,12 +101,12 @@ export async function processEscalations(): Promise<EscalationRunResult> {
       triggerEvent: "TAT_DELAY_DAILY",
       recipients: to,
       cc: unique(cc),
-      excludeManagement: !includeManagement,
+      excludeManagement: true,
       dedupeKey: `TATDELAY_${complaint._id}_${todayStr}`,
       relatedComplaintId: complaint._id,
       automated: { daysDelayed: Math.floor(maxOverdueHours / 24) },
       data: {
-        statusLabel: includeManagement ? "ESCALATED" : "Delayed",
+        statusLabel: "Delayed",
         complaintNumber: complaint.number,
         delayedCount: String(delayed.length),
         maxDaysLate: lateText(maxOverdueHours),
@@ -122,16 +118,14 @@ export async function processEscalations(): Promise<EscalationRunResult> {
         departmentName: (complaint.responsibleDept as { name?: string })?.name || "General",
         ownerName: ownerEmployee?.name || (complaint.owner as { name?: string })?.name || "Assigned Owner",
         priority: (complaint.priority as { name?: string })?.name || "Standard",
-        escalationNote: includeManagement
-          ? `Management has been copied because a stage is more than ${MANAGEMENT_ESCALATION_DAYS} days late.`
-          : `Management is copied only when a stage is more than ${MANAGEMENT_ESCALATION_DAYS} days late.`,
+        escalationNote: "Management receives only the monthly summary report.",
         actionUrl: `/complaints/${complaint._id}`
       }
     });
     if (res.status === "sent") complaintsEscalated++;
   }
 
-  // 2. Overdue CAPAs: the same rule, Management only beyond ten days
+  // 2. Overdue CAPAs: same rule, Management is never copied
   const overdueCapas = await Capa.find({
     status: { $nin: ["Closed", "Completed", "Under Verification"] },
     dueDate: { $lt: now }
@@ -144,20 +138,17 @@ export async function processEscalations(): Promise<EscalationRunResult> {
     if (!capa.dueDate) continue;
     const targetDate = new Date(capa.dueDate);
     const dedupeKey = `ESCALATION_CAPA_${capa._id}_${todayStr}`;
-    const includeManagement = needsManagementEscalation(Math.floor((now.getTime() - targetDate.getTime()) / 3600000));
 
     const recipients = await resolveRecipients({
       capaId: capa._id,
       targetRoles: ["CAPA Owner", "Department Head"]
     });
-    const cc = includeManagement ? await resolveRecipients({ capaId: capa._id, targetRoles: ["Management"] }) : [];
 
     if (recipients.length > 0) {
       const res = await sendTemplatedEmail({
         triggerEvent: "CAPA_OVERDUE",
         recipients,
-        cc,
-        excludeManagement: !includeManagement,
+        excludeManagement: true,
         dedupeKey,
         relatedCapaId: capa._id,
         automated: { daysDelayed: Math.floor((now.getTime() - targetDate.getTime()) / 86400000) },

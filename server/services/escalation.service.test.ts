@@ -83,17 +83,15 @@ describe("daily TAT delay emails", () => {
     expect(b.cc).toEqual(COMMON);
   });
 
-  it("leaves Management out until a delay passes 10 days", async () => {
+  it("never copies Management, however late a stage is", async () => {
     await processEscalations();
-    const b = forComplaint("B")!;
-    expect(b.excludeManagement).toBe(true);
-    expect(b.cc).not.toContain("mgmt@onepws.com");
-    expect(b.data.statusLabel).toBe("Delayed");
-
-    const a = forComplaint("A")!;
-    expect(a.excludeManagement).toBe(false);
-    expect(a.cc).toEqual(expect.arrayContaining([...COMMON, "mgmt@onepws.com"]));
-    expect(a.data.statusLabel).toBe("ESCALATED");
+    for (const key of ["A", "B"]) {
+      const mail = forComplaint(key)!;
+      expect(mail.excludeManagement).toBe(true);
+      expect(mail.cc).not.toContain("mgmt@onepws.com");
+      expect(mail.cc).toEqual(expect.arrayContaining(COMMON));
+      expect(mail.data.statusLabel).toBe("Delayed");
+    }
   });
 
   it("lists all four stages and how late the delayed ones are", async () => {
