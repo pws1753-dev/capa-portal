@@ -1,5 +1,6 @@
 import { WORKFLOW_STAGES, type TatHealth, type WorkflowStage } from "@shared/constants/domain";
 import type { DomainComplaint, TatConfig } from "./types";
+import { endOfDueDay, isPastDueDay } from "./due-day";
 
 export type StageTat = {
   stage: WorkflowStage;
@@ -56,7 +57,8 @@ export function stageHealth(
   now: Date,
   dueSoonHours: number
 ): TatHealth {
-  const due = new Date(dueAt);
+  // The due date is a calendar day: finishing at any time on it is on time.
+  const due = endOfDueDay(dueAt);
   if (completedAt) return new Date(completedAt) <= due ? "on-time" : "overdue";
   if (now > due) return "overdue";
   const hoursRemaining = (due.getTime() - now.getTime()) / HOUR_MS;
@@ -97,7 +99,7 @@ export function buildTatPlan(complaint: DomainComplaint, config: TatConfig, now:
 
 /** True when the stage is being completed after its due date and therefore needs a delay reason. */
 export function isStageOverdueNow(complaint: DomainComplaint, stage: WorkflowStage, config: TatConfig, now: Date = new Date()): boolean {
-  return now > computeStageDueDates(complaint, config)[stage];
+  return isPastDueDay(computeStageDueDates(complaint, config)[stage], now);
 }
 
 /** Reminder trigger points as absolute timestamps, e.g. at 50 / 75 / 90 percent of the window. */

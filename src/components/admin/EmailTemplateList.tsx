@@ -9,6 +9,8 @@ import { EMAIL_TRIGGER_EVENTS, EMAIL_TRIGGER_LABELS, type EmailTriggerEvent } fr
 import { api } from "@/lib/api";
 import { errorText } from "@/lib/errors";
 import { EmailTemplateForm, type TemplateData } from "./EmailTemplateForm";
+import { EmailRecipientRules } from "./EmailRecipientRules";
+import { EMAIL_DEFAULT_RECIPIENTS } from "@shared/constants/email-recipients";
 
 type PreviewResult = {
   subject: string;
@@ -140,6 +142,8 @@ export function EmailTemplateList() {
         </Button>
       </div>
 
+      <EmailRecipientRules />
+
       {/* Filter Bar */}
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white p-3.5 shadow-2xs">
         <div className="relative flex-1 min-w-[200px]">
@@ -174,6 +178,7 @@ export function EmailTemplateList() {
                 <th className="px-4 py-3">Template Name &amp; Key</th>
                 <th className="px-4 py-3">Domain Trigger Event</th>
                 <th className="px-4 py-3">Default Subject</th>
+                <th className="px-4 py-3">To / CC</th>
                 <th className="px-4 py-3 text-center">Status</th>
                 <th className="px-4 py-3 text-right">Actions</th>
               </tr>
@@ -181,7 +186,7 @@ export function EmailTemplateList() {
             <tbody className="divide-y divide-slate-100">
               {filteredTemplates.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="py-8 text-center text-slate-400">
+                  <td colSpan={6} className="py-8 text-center text-slate-400">
                     {templatesQuery.isLoading ? "Loading templates..." : "No email templates found matching filters."}
                   </td>
                 </tr>
@@ -199,6 +204,17 @@ export function EmailTemplateList() {
                     </td>
                     <td className="px-4 py-3 align-top max-w-xs truncate text-slate-600">
                       {t.subject}
+                    </td>
+                    <td className="px-4 py-3 align-top text-[11px] leading-4 text-slate-600">
+                      <div>
+                        <strong className="text-slate-700">To:</strong> {EMAIL_DEFAULT_RECIPIENTS[t.triggerEvent]?.to || "—"}
+                        {(t.toEmails?.length ?? 0) > 0 ? <span className="text-brand-red"> + {t.toEmails?.join(", ")}</span> : null}
+                      </div>
+                      <div>
+                        <strong className="text-slate-700">CC:</strong> {EMAIL_DEFAULT_RECIPIENTS[t.triggerEvent]?.cc || "—"}
+                        {(t.ccRules?.length ?? 0) > 0 ? <span className="text-brand-red"> + {t.ccRules?.join(", ")}</span> : null}
+                      </div>
+                      {(t.excludeEmails?.length ?? 0) > 0 ? <div className="text-red-700">Removed: {t.excludeEmails?.join(", ")}</div> : null}
                     </td>
                     <td className="px-4 py-3 align-top text-center">
                       {t.isActive ? (

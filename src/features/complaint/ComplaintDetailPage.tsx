@@ -35,6 +35,7 @@ import {
   type ComplaintDetail
 } from "@/services/queries";
 import { AttachmentsTab } from "./AttachmentsTab";
+import { ComplaintPhoto } from "./ComplaintPhoto";
 import { AuditTab } from "./AuditTab";
 import { CapaTab } from "./CapaTab";
 import { EditComplaintModal } from "./EditComplaintModal";
@@ -82,6 +83,11 @@ export function ComplaintDetailPage() {
   // Delete modal state (Master Admin)
   const [showDeleteModal, setShowDeleteModal] = useState(false);
 
+  // Force close modal state (Master Admin)
+  const [showForceCloseModal, setShowForceCloseModal] = useState(false);
+  const [forceRemarks, setForceRemarks] = useState("");
+  const [forceError, setForceError] = useState<string | null>(null);
+
   // Edit modal state (Master Admin)
   const [showEditModal, setShowEditModal] = useState(false);
 
@@ -98,7 +104,7 @@ export function ComplaintDetailPage() {
 
   const closeMutation = useApiMutation<
     { complaint: ComplaintDetail },
-    { closureRemarks: string; noRepeatConfirmed: boolean; force: boolean }
+    { closureRemarks: string; noRepeatConfirmed: boolean; force: boolean; forceCloseAll?: boolean }
   >("POST", `/api/complaints/${id}/close`, invalidate);
 
   const reopenMutation = useApiMutation<{ complaint: ComplaintDetail }, { reason: string }>(
@@ -107,7 +113,7 @@ export function ComplaintDetailPage() {
     invalidate
   );
 
-  const deleteMutation = useApiMutation<{ message: string }>(
+  const deleteMutation = useApiMutation<{ deleted: boolean }, { confirmation: string }>(
     "DELETE",
     `/api/complaints/${id}`,
     [["complaints"], ["analytics"]]
@@ -239,6 +245,23 @@ export function ComplaintDetailPage() {
     }
   }
 
+  async function handleForceCloseSubmit() {
+    if (forceRemarks.trim().length < 5) {
+      setForceError("Closure remarks must be at least 5 characters.");
+      return;
+    }
+    setForceError(null);
+    try {
+      await closeMutation.mutateAsync({ closureRemarks: forceRemarks.trim(), noRepeatConfirmed: false, force: true, forceCloseAll: true });
+      toast.success(`Complaint ${complaint?.number} force closed`);
+      setShowForceCloseModal(false);
+      setForceRemarks("");
+    } catch (error) {
+      setForceError(error instanceof ApiError ? error.message : "The complaint could not be force closed.");
+      toast.failure(error, "Force close failed");
+    }
+  }
+
   async function handleReopenSubmit() {
     if (reopenReason.trim().length < 5) {
       toast.error("A reopen reason of at least 5 characters is required");
@@ -256,7 +279,7 @@ export function ComplaintDetailPage() {
 
   async function handleDeleteConfirm() {
     try {
-      await deleteMutation.mutateAsync(undefined);
+      await deleteMutation.mutateAsync({ confirmation: complaint?.number ?? "" });
       toast.success(`Complaint ${complaint?.number} permanently deleted`);
       navigate("/complaints");
     } catch (error) {
@@ -337,6 +360,21 @@ export function ComplaintDetailPage() {
               >
                 <Lock className="mr-1.5 h-3.5 w-3.5" />
                 Close Complaint
+              </Button>
+            )}
+
+            {!isClosed && permissions.isMasterAdmin && (
+              <Button
+                type="button"
+                variant="danger"
+                className="text-xs"
+                onClick={() => {
+                  setForceError(null);
+                  setShowForceCloseModal(true);
+                }}
+              >
+                <ShieldAlert className="mr-1.5 h-3.5 w-3.5" />
+                Force Close
               </Button>
             )}
 
@@ -471,23 +509,24 @@ export function ComplaintDetailPage() {
             <div className="lg:col-span-8 space-y-6">
               {/* Problem Description Card */}
               <SectionCard title="Problem Description & Customer Voice">
-                <div className="space-y-4 text-xs">
+                <div className="grid gap-4 text-xs md:grid-cols-[minmax(0,1fr)_14rem]">
                   <div>
                     <span className="text-slate-400 font-medium">Detailed Description:</span>
                     <p className="mt-1 text-slate-800 text-sm whitespace-pre-wrap leading-relaxed">
                       {complaint.description}
                     </p>
                   </div>
+                  <ComplaintPhoto complaint={complaint} canEdit={canEdit && !isClosed} />
 
                   {complaint.containmentNotes && (
-                    <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-3">
+                    <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-3 md:col-span-2">
                       <span className="text-slate-500 font-semibold block">Immediate Containment Action:</span>
                       <p className="mt-1 text-slate-800">{complaint.containmentNotes}</p>
                     </div>
                   )}
 
                   {isClosed && complaint.closureRemarks && (
-                    <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-3 text-emerald-900">
+                    <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-3 text-emerald-900 md:col-span-2">
                       <span className="font-bold block">Closure Remarks:</span>
                       <p className="mt-1">{complaint.closureRemarks}</p>
                     </div>
@@ -703,6 +742,31 @@ export function ComplaintDetailPage() {
               onClick={handleCloseSubmit}
             >
               {closeMutation.isPending ? "Validating & Closing..." : "Confirm Closure"}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Force Close Modal (Master Admin) */}
+      <Modal open={showForceCloseModal} onOpenChange={setShowForceCloseModal} title={`Force Close: ${complaint.number}`}>
+        <div className="space-y-4 text-sm">
+          <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-800">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
+            <span>
+              This closes the complaint even if mandatory stages, 8D sections, signatures or CAPAs are incomplete. The closure is recorded in the
+              workflow timeline and audit trail as a Master Admin force close.
+            </span>
+          </div>
+          {forceError ? <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">{forceError}</p> : null}
+          <Field label="Reason for force closing" required>
+            <Textarea rows={3} value={forceRemarks} onChange={(event) => setForceRemarks(event.target.value)} placeholder="Why is this complaint being closed without full completion? (minimum 5 characters)" />
+          </Field>
+          <div className="flex justify-end gap-2 border-t border-slate-100 pt-3">
+            <Button type="button" variant="secondary" onClick={() => setShowForceCloseModal(false)}>
+              Cancel
+            </Button>
+            <Button type="button" variant="danger" disabled={closeMutation.isPending || forceRemarks.trim().length < 5} onClick={handleForceCloseSubmit}>
+              {closeMutation.isPending ? "Closing..." : "Force Close Complaint"}
             </Button>
           </div>
         </div>

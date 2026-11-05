@@ -19,7 +19,7 @@ export const attachmentRouter = Router();
 attachmentRouter.use(requireUser);
 
 const ENTITY_PURPOSES = {
-  Complaint: ["complaint.attachment", "d6.document"],
+  Complaint: ["complaint.attachment", "complaint.photo", "d6.document"],
   Capa: ["capa.evidence", "capa.effectiveness"],
   Company: ["company.logo"]
 } as const;
@@ -42,7 +42,7 @@ attachmentRouter.post(
       (input.purpose === "company.logo" && isMasterAdmin(actor)) ||
       ((input.purpose === "capa.evidence" || input.purpose === "capa.effectiveness") &&
         (hasPermission(actor, "capa.edit.own") || hasPermission(actor, "complaint.assign") || hasPermission(actor, "capa.verify"))) ||
-      ((input.purpose === "complaint.attachment" || input.purpose === "d6.document") &&
+      ((input.purpose === "complaint.attachment" || input.purpose === "complaint.photo" || input.purpose === "d6.document") &&
         (hasPermission(actor, "complaint.create") ||
           hasPermission(actor, "complaint.edit") ||
           hasPermission(actor, "complaint.edit.own") ||
@@ -89,7 +89,17 @@ attachmentRouter.post(
       if (!company) throw httpError(404, "Company not found");
     }
 
+    // A complaint carries one photo: it must be an image, and a new one replaces the previous one.
+    if (input.purpose === "complaint.photo" && !input.mimeType.startsWith("image/")) {
+      throw httpError(400, "The complaint photo must be an image (JPG, PNG, WebP or similar)");
+    }
     const attachment = await confirmUpload(input, req.user);
+    if (input.purpose === "complaint.photo") {
+      const previous = await Attachment.find({ entityType: "Complaint", entityId: input.entityId, purpose: "complaint.photo", _id: { $ne: attachment._id } })
+        .select("_id")
+        .lean();
+      for (const old of previous) await deleteAttachment(String(old._id), req.user, true);
+    }
     return ok(res, { attachment }, 201);
   })
 );

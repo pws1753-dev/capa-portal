@@ -161,3 +161,23 @@ export async function deleteAttachment(attachmentId: string, user: ApiUser | und
 
   return { deleted: true, filename: sanitizeFilename(attachment.originalFilename) };
 }
+
+/**
+ * Removes every attachment of the given records together with its Cloudinary asset. Used when a complaint
+ * is deleted, so nothing is orphaned. A Cloudinary failure never blocks the deletion of the database record.
+ */
+export async function purgeAttachmentsFor(entityType: "Complaint" | "Capa", entityIds: Types.ObjectId[]): Promise<number> {
+  if (entityIds.length === 0) return 0;
+  const attachments = await Attachment.find({ entityType, entityId: { $in: entityIds } }).lean();
+  if (attachments.length === 0) return 0;
+  try {
+    const { cloudinary: client } = configuredCloudinary();
+    for (const attachment of attachments) {
+      await client.uploader.destroy(attachment.publicId, { resource_type: attachment.resourceType }).catch(() => undefined);
+    }
+  } catch {
+    // Cloudinary is not configured here: the records are still removed.
+  }
+  await Attachment.deleteMany({ _id: { $in: attachments.map((attachment) => attachment._id) } });
+  return attachments.length;
+}

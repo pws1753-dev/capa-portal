@@ -227,7 +227,7 @@ export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 export const NOTIFICATION_CATEGORIES = ["complaint", "capa", "workflow", "evidence", "effectiveness", "system"] as const;
 export type NotificationCategory = (typeof NOTIFICATION_CATEGORIES)[number];
 
-export const ATTACHMENT_PURPOSES = ["complaint.attachment", "capa.evidence", "capa.effectiveness", "d6.document", "company.logo"] as const;
+export const ATTACHMENT_PURPOSES = ["complaint.attachment", "complaint.photo", "capa.evidence", "capa.effectiveness", "d6.document", "company.logo"] as const;
 export type AttachmentPurpose = (typeof ATTACHMENT_PURPOSES)[number];
 
 export const ALLOWED_UPLOAD_MIME_TYPES = [

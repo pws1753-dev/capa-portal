@@ -5,7 +5,6 @@ import type { ComplaintCreateInput, ComplaintListQuery, ComplaintUpdateInput, St
 import { openCapaWarnings, shouldAutoReopenOnLongTerm, validateForClosure } from "../domain/closure";
 import { canCloseComplaint, canEditComplaint, canSeeCompany, canViewComplaint, hasPermission, isMasterAdmin } from "../domain/rbac";
 import { nextReviewDue } from "../domain/effectiveness-review";
-import { COMMON_CC_EMAILS } from "../lib/email-policy";
 import { describeRepeatBasis, findRepeatMatches, repeatCutoff } from "../domain/repeat";
 import { buildSignatureRecord, rolesInvalidatedBy, validateRevocation, validateSignature } from "../domain/signature";
 import { buildTatPlan, isStageOverdueNow } from "../domain/tat";
@@ -14,7 +13,9 @@ import { delayGaps, stageGaps, stageSequenceGaps, type Gap } from "../domain/wor
 import { Capa } from "../models/Capa";
 import { Complaint, type ComplaintHydrated } from "../models/Complaint";
 import { Department } from "../models/Department";
+import { ComplaintNote } from "../models/ComplaintNote";
 import { EffectivenessCheck } from "../models/EffectivenessCheck";
+import { Notification } from "../models/Notification";
 import { Employee } from "../models/Employee";
 import { Priority } from "../models/masters";
 import { User } from "../models/User";
@@ -22,12 +23,13 @@ import { activeDelayReasons, resolveTatConfig } from "./config.service";
 import { toDomainActor, toDomainCapa, toDomainComplaint } from "./mappers";
 import { notify, usersWithRole } from "./notification.service";
 import { sendTemplatedEmail } from "./email.service";
+import { purgeAttachmentsFor } from "./attachment.service";
+import { getEmailRouting } from "./email-routing.service";
 import { resolveRecipients } from "./email-recipient.service";
 import { nextComplaintNumber } from "./numbering.service";
 import { writeAudit } from "./audit.service";
 import { businessRuleError, httpError, type FieldIssue } from "../utils/http";
 
-const COMPLAINT_CREATED_FIXED_CC = COMMON_CC_EMAILS;
 
 function gapsToIssues(gaps: Gap[]): FieldIssue[] {
   return gaps.map((gap) => ({ field: gap.field, section: gap.section, message: gap.hint ? `${gap.field} — ${gap.hint}` : gap.field }));
@@ -197,7 +199,7 @@ export async function createComplaint(input: ComplaintCreateInput, user: ApiUser
   const emailCc = await resolveRecipients({
     complaintId: doc._id,
     targetRoles: ["Manager", "Department Head"],
-    explicitEmails: COMPLAINT_CREATED_FIXED_CC
+    explicitEmails: (await getEmailRouting()).commonCc
   });
   if (emailRecipients.length > 0) {
     const [ownerUser, responsibleDepartment] = await Promise.all([
@@ -440,7 +442,7 @@ export async function listComplaints(query: ComplaintListQuery, user: ApiUser | 
 export async function getComplaintDetail(complaintId: string, user: ApiUser | undefined) {
   const context = await loadComplaintContext(complaintId, user);
   const tatConfig = await resolveTatConfig(context.doc.company);
-  const capas = await Capa.find({ complaint: context.doc._id }).populate("owner", "name").sort({ sequence: 1 }).lean();
+  const capas = await Capa.find({ complaint: context.doc._id }).populate("owner", "name").populate("ownerEmployee", "name").sort({ sequence: 1 }).lean();
   const { priority, internalDept, againstDept, responsibleDept } = context.doc;
   const [ownerUser, ownerEmployee, priorityDoc, departments] = await Promise.all([
     context.doc.owner ? User.findById(context.doc.owner).select("name").lean() : null,
@@ -722,21 +724,25 @@ export async function revokeSignature(complaintId: string, role: SignatureRole, 
 
 export async function closeComplaint(
   complaintId: string,
-  input: { closureRemarks: string; noRepeatConfirmed: boolean; force: boolean },
+  input: { closureRemarks: string; noRepeatConfirmed: boolean; force: boolean; forceCloseAll?: boolean },
   user: ApiUser | undefined
 ) {
   const context = await loadComplaintContext(complaintId, user);
   if (!canCloseComplaint(context.actor, context.domain)) throw httpError(403, "You do not have permission to close complaints");
   if (context.doc.closedAt) throw httpError(409, "This complaint is already closed");
 
+  // Force Close: only a Master Admin may close a complaint that is incompletely filled or has open CAPAs.
+  const forceCloseAll = Boolean(input.forceCloseAll);
+  if (forceCloseAll && !isMasterAdmin(context.actor)) throw httpError(403, "Only a Master Admin can force close a complaint");
+
   const capas = await loadDomainCapas(complaintId);
   const gaps = validateForClosure(context.domain, capas);
-  if (gaps.length > 0) {
+  if (gaps.length > 0 && !forceCloseAll) {
     throw businessRuleError(`This complaint cannot be closed yet (${gaps.length} mandatory item(s) missing)`, gapsToIssues(gaps));
   }
 
   const openCapas = openCapaWarnings(capas);
-  if (openCapas.length > 0 && !input.force) {
+  if (openCapas.length > 0 && !input.force && !forceCloseAll) {
     throw businessRuleError("Some CAPAs are still open", [
       { field: "capas", section: "CAPA", message: `Still open: ${openCapas.join(", ")}. Resend with force to close anyway.` }
     ]);
@@ -748,7 +754,12 @@ export async function closeComplaint(
   context.doc.closureRemarks = input.closureRemarks;
   context.doc.d7NoRepeatConfirmed = input.noRepeatConfirmed;
   context.doc.status = "Closed";
-  pushWorkflowLog(context.doc, "Closed", context.actor, input.closureRemarks);
+  pushWorkflowLog(
+    context.doc,
+    "Closed",
+    context.actor,
+    forceCloseAll ? `Force closed by Master Admin${gaps.length ? ` with ${gaps.length} mandatory item(s) incomplete` : ""}. ${input.closureRemarks}` : input.closureRemarks
+  );
   await context.doc.save();
 
   await writeAudit({
@@ -756,7 +767,12 @@ export async function closeComplaint(
     action: "CLOSE",
     entity: "Complaint",
     entityId: complaintId,
-    after: { closedAt: now.toISOString(), remarks: input.closureRemarks, forcedOverOpenCapas: openCapas }
+    after: {
+      closedAt: now.toISOString(),
+      remarks: input.closureRemarks,
+      forcedOverOpenCapas: openCapas,
+      ...(forceCloseAll ? { forceClosed: true, skippedRequirements: gaps.map((gap) => `${gap.section}: ${gap.field}`) } : {})
+    }
   });
 
   await notify({
@@ -911,7 +927,16 @@ export async function deleteComplaint(complaintId: string, confirmation: string,
   }
 
   const snapshot = context.doc.toObject();
-  await Capa.deleteMany({ complaint: context.doc._id });
+  // Remove everything that belongs to the complaint so no orphaned records are left behind.
+  const capaIds = (await Capa.find({ complaint: context.doc._id }).select("_id").lean()).map((capa) => capa._id);
+  await purgeAttachmentsFor("Capa", capaIds);
+  await purgeAttachmentsFor("Complaint", [context.doc._id]);
+  await Promise.all([
+    Capa.deleteMany({ complaint: context.doc._id }),
+    ComplaintNote.deleteMany({ complaint: context.doc._id }),
+    EffectivenessCheck.deleteMany({ complaint: context.doc._id }),
+    Notification.deleteMany({ entityId: { $in: [context.doc._id, ...capaIds] } })
+  ]);
   await Complaint.deleteOne({ _id: context.doc._id });
 
   // The audit trail intentionally survives the deletion.

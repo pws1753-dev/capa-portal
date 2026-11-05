@@ -12,6 +12,7 @@ import { useToast } from "@/components/ui/toast-context";
 import { ApiError } from "@/lib/api";
 import { formatBytes, formatDate, formatDateTime, statusTone } from "@/lib/format";
 import {
+  capaOwnerName,
   useApiMutation,
   useAssignableUsers,
   useAttachments,
@@ -39,9 +40,15 @@ function idOf(value: CapaItem["owner"]): string {
   return typeof value === "string" ? value : value._id;
 }
 
-function nameOf(value: CapaItem["owner"]): string {
+function nameOf(value: CapaItem["department"]): string {
   if (!value) return "—";
   return typeof value === "string" ? "—" : (value.name ?? "—");
+}
+
+/** The owner picker value: a portal user id, or `emp:<id>` for a directory employee without a login. */
+function ownerValueOf(capa: CapaItem): string {
+  const employee = idOf(capa.ownerEmployee);
+  return employee ? `emp:${employee}` : idOf(capa.owner);
 }
 
 export function CapaTab({ complaint, capas, canEdit }: { complaint: ComplaintDetail; capas: CapaItem[]; canEdit: boolean }) {
@@ -75,7 +82,7 @@ export function CapaTab({ complaint, capas, canEdit }: { complaint: ComplaintDet
     setForm({
       type: capa.type,
       action: capa.action,
-      owner: idOf(capa.owner),
+      owner: ownerValueOf(capa),
       department: idOf(capa.department),
       dueDate: capa.dueDate ? capa.dueDate.slice(0, 10) : "",
       status: capa.status,
@@ -90,7 +97,8 @@ export function CapaTab({ complaint, capas, canEdit }: { complaint: ComplaintDet
     const payload = {
       type: form.type,
       action: form.action,
-      owner: form.owner || undefined,
+      owner: form.owner && !form.owner.startsWith("emp:") ? form.owner : undefined,
+      ownerEmployee: form.owner.startsWith("emp:") ? form.owner.slice(4) : undefined,
       department: form.department || undefined,
       dueDate: form.dueDate ? new Date(form.dueDate).toISOString() : undefined,
       status: form.status,
@@ -151,7 +159,7 @@ export function CapaTab({ complaint, capas, canEdit }: { complaint: ComplaintDet
                   <dl className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
                     {[
                       { label: "Type", value: capa.type },
-                      { label: "Owner", value: nameOf(capa.owner) },
+                      { label: "Owner", value: capaOwnerName(capa) },
                       { label: "Department", value: nameOf(capa.department) },
                       { label: "Due", value: formatDate(capa.dueDate) },
                       { label: "Assigned", value: formatDate(capa.assignedAt) },
@@ -225,9 +233,18 @@ export function CapaTab({ complaint, capas, canEdit }: { complaint: ComplaintDet
               <option value="">Select an owner</option>
               {(assignable.data?.users ?? []).map((user) => (
                 <option key={user.id} value={user.id}>
-                  {user.name}
+                  {user.name} {user.role ? `— ${user.role}` : ""}
                 </option>
               ))}
+              {(assignable.data?.employees ?? []).length > 0 ? (
+                <optgroup label="Employee Directory (no portal login)">
+                  {(assignable.data?.employees ?? []).map((employee) => (
+                    <option key={employee.id} value={`emp:${employee.id}`}>
+                      {employee.name} {employee.designation ? `— ${employee.designation}` : ""}
+                    </option>
+                  ))}
+                </optgroup>
+              ) : null}
             </Select>
           </Field>
           <Field label="Department">

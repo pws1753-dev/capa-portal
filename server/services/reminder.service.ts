@@ -5,6 +5,7 @@ import { TATConfiguration } from "../models/configuration";
 import { DEFAULT_TAT_CONFIG, type WorkflowStage } from "@shared/constants/domain";
 import { computeStageDueDates } from "../domain/tat";
 import { daysUntil, effectivenessReminderBucket, nextReviewDue } from "../domain/effectiveness-review";
+import { isPastDueDay } from "../domain/due-day";
 import { istDaysUntil, reminderLookaheadDays } from "../domain/email-schedule";
 import { EffectivenessCheck } from "../models/EffectivenessCheck";
 import { resolveRecipients } from "./email-recipient.service";
@@ -153,8 +154,8 @@ export async function processReminders(): Promise<ReminderRunResult> {
 
     // One reminder, the day before the stage's due date. Later reminders (once the stage is late) come
     // from the escalation job, weekly, in the same email thread.
-    const msUntilDue = targetDate.getTime() - now.getTime();
-    if (msUntilDue > 0 && istDaysUntil(targetDate, now) <= reminderLookaheadDays(now)) {
+    // Not yet late: the due date's day has not ended.
+    if (!isPastDueDay(targetDate, now) && istDaysUntil(targetDate, now) <= reminderLookaheadDays(now)) {
       const recipients = await resolveRecipients({
         complaintId: complaint._id,
         targetRoles: ["Complaint Owner", "Coordinator"]
@@ -187,6 +188,7 @@ export async function processReminders(): Promise<ReminderRunResult> {
     status: { $nin: ["Closed", "Completed", "Under Verification"] }
   })
     .populate("owner", "name email")
+    .populate("ownerEmployee", "name email")
     .populate("complaint", "number")
     .lean();
 
@@ -194,7 +196,7 @@ export async function processReminders(): Promise<ReminderRunResult> {
     if (!capa.dueDate) continue;
     const targetDate = new Date(capa.dueDate);
     // One reminder the day before the target date; overdue reminders follow weekly in the same thread.
-    if (targetDate.getTime() > now.getTime() && istDaysUntil(targetDate, now) <= reminderLookaheadDays(now)) {
+    if (!isPastDueDay(targetDate, now) && istDaysUntil(targetDate, now) <= reminderLookaheadDays(now)) {
       const dedupeKey = `PREDUE_CAPA_${capa._id}`;
       const recipients = await resolveRecipients({
         capaId: capa._id,
@@ -212,7 +214,7 @@ export async function processReminders(): Promise<ReminderRunResult> {
             capaNumber: capa.number,
             capaTitle: capa.action || "Corrective Action",
             targetDate: targetDate.toLocaleDateString("en-IN"),
-            assignedTo: (capa.owner as { name?: string })?.name || "CAPA Owner",
+            assignedTo: (capa.ownerEmployee as { name?: string } | null)?.name || (capa.owner as { name?: string })?.name || "CAPA Owner",
             actionUrl: `/capa/tracker`
           }
         });

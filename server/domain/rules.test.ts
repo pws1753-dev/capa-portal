@@ -31,13 +31,23 @@ describe("TAT engine", () => {
   });
 
   it("classifies on-time, due-soon and overdue", () => {
-    const plan = buildTatPlan(complaint, tatConfig, new Date("2026-05-01T06:00:00.000Z"));
+    const plan = buildTatPlan(complaint, tatConfig, new Date("2026-05-02T00:00:00.000Z"));
     expect(plan.find((entry) => entry.stage === "ack")?.health).toBe("due-soon");
     expect(plan.find((entry) => entry.stage === "capa")?.health).toBe("on-time");
 
     const late = buildTatPlan(complaint, tatConfig, new Date("2026-05-10T00:00:00.000Z"));
     expect(late.find((entry) => entry.stage === "ack")?.health).toBe("overdue");
     expect(late.find((entry) => entry.stage === "ack")?.overdue).toBe(true);
+  });
+
+  it("treats completion at any time on the due date as on time, and late only after that day", () => {
+    // ack is due 2 May 05:30 IST: finishing that evening (IST) is still on time.
+    const sameDay = makeComplaint({ acknowledgedAt: "2026-05-02T12:34:00.000Z" });
+    expect(buildTatPlan(sameDay, tatConfig, new Date("2026-05-02T13:00:00.000Z")).find((entry) => entry.stage === "ack")?.health).toBe("on-time");
+    const nextDay = makeComplaint({ acknowledgedAt: "2026-05-02T19:00:00.000Z" });
+    expect(buildTatPlan(nextDay, tatConfig, new Date("2026-05-03T00:00:00.000Z")).find((entry) => entry.stage === "ack")?.health).toBe("overdue");
+    // Not completed: still on the due date, not overdue yet.
+    expect(buildTatPlan(complaint, tatConfig, new Date("2026-05-02T12:00:00.000Z")).find((entry) => entry.stage === "ack")?.overdue).toBe(false);
   });
 
   it("marks a stage completed after its due date as overdue", () => {

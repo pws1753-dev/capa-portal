@@ -1,4 +1,4 @@
-import { useCallback, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { ALLOWED_UPLOAD_MIME_TYPES, type AttachmentPurpose } from "@shared/constants/domain";
 import { FileText, Plus, Trash2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/Button";
@@ -7,7 +7,8 @@ import { Field, Select, Textarea } from "@/components/ui/Field";
 import { Input } from "@/components/ui/Input";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import type { ActionRow } from "@/services/queries";
+import { PersonMultiSelect, type PersonOption } from "@/components/ui/PersonMultiSelect";
+import { useAssignableUsers, type ActionRow } from "@/services/queries";
 
 /** A small Cloudinary-resized copy for list rows; any other URL is used unchanged. */
 function thumbnailUrl(url: string) {
@@ -57,7 +58,8 @@ export function ActionRowsEditor({
   readOnly,
   showCtq,
   showCustomerApproval,
-  defaultTarget
+  defaultTarget,
+  company
 }: {
   rows: ActionRow[];
   onChange: (rows: ActionRow[]) => void;
@@ -65,7 +67,24 @@ export function ActionRowsEditor({
   showCtq?: boolean;
   showCustomerApproval?: boolean;
   defaultTarget?: string;
+  company?: string;
 }) {
+  const people = useAssignableUsers(company);
+  const options = useMemo(() => {
+    const seen = new Set<string>();
+    const list: PersonOption[] = [];
+    for (const user of people.data?.users ?? []) list.push({ name: user.name, hint: user.role });
+    for (const employee of people.data?.employees ?? []) list.push({ name: employee.name, hint: employee.designation });
+    return list
+      .filter((option) => {
+        const key = option.name.trim().toLowerCase();
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [people.data]);
+
   function update(index: number, patch: Partial<ActionRow>) {
     onChange(rows.map((row, position) => (position === index ? { ...row, ...patch } : row)));
   }
@@ -83,7 +102,7 @@ export function ActionRowsEditor({
             </div>
             <div className="lg:col-span-3">
               <Field label="Responsibility">
-                <Input value={row.resp ?? ""} disabled={readOnly} onChange={(event) => update(index, { resp: event.target.value })} />
+                <PersonMultiSelect value={row.resp} options={options} disabled={readOnly} onChange={(resp) => update(index, { resp })} />
               </Field>
             </div>
             <div className="lg:col-span-2">

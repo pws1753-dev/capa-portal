@@ -7,6 +7,7 @@ import { Capa } from "../models/Capa";
 import { Company } from "../models/Company";
 import { Complaint } from "../models/Complaint";
 import { Department } from "../models/Department";
+import { EmailRouting } from "../models/EmailRouting";
 import { EmailTemplate } from "../models/EmailTemplate";
 import { Employee } from "../models/Employee";
 import { EscalationConfiguration, NumberingConfiguration, TATConfiguration } from "../models/configuration";
@@ -33,6 +34,7 @@ export const systemBackupSchema = z.object({
     escalationConfigurations: z.array(recordSchema),
     numberingConfigurations: z.array(recordSchema),
     emailTemplates: z.array(recordSchema),
+    emailRouting: z.array(recordSchema).default([]),
     complaints: z.array(recordSchema),
     capas: z.array(recordSchema),
     attachments: z.array(recordSchema)
@@ -63,6 +65,7 @@ const COLLECTION_KEYS: CollectionKey[] = [
   "escalationConfigurations",
   "numberingConfigurations",
   "emailTemplates",
+  "emailRouting",
   "complaints",
   "capas",
   "attachments"
@@ -113,6 +116,7 @@ export async function exportSystemBackup(user: ApiUser | undefined): Promise<Sys
     escalationConfigurations,
     numberingConfigurations,
     emailTemplates,
+    emailRouting,
     complaints,
     capas,
     attachments
@@ -128,6 +132,7 @@ export async function exportSystemBackup(user: ApiUser | undefined): Promise<Sys
     EscalationConfiguration.find().lean(),
     NumberingConfiguration.find().lean(),
     EmailTemplate.find().select("-createdBy -updatedBy").lean(),
+    EmailRouting.find().select("-updatedBy").lean(),
     Complaint.find().lean(),
     Capa.find().lean(),
     Attachment.find().lean()
@@ -149,6 +154,7 @@ export async function exportSystemBackup(user: ApiUser | undefined): Promise<Sys
       escalationConfigurations,
       numberingConfigurations,
       emailTemplates,
+      emailRouting,
       complaints,
       capas,
       attachments
@@ -259,6 +265,12 @@ async function restoreEmailTemplate(record: Record<string, unknown>, dryRun: boo
   return "inserted" as const;
 }
 
+async function restoreEmailRouting(record: Record<string, unknown>, dryRun: boolean) {
+  if (await EmailRouting.exists({ key: "global" })) return "existing" as const;
+  if (!dryRun) await EmailRouting.create(safeRecord(record));
+  return "inserted" as const;
+}
+
 async function restoreComplaint(record: Record<string, unknown>, dryRun: boolean) {
   const id = idOf(record);
   const number = stringField(record, "number");
@@ -303,6 +315,7 @@ async function restoreOne(key: CollectionKey, record: Record<string, unknown>, d
     case "escalationConfigurations":
     case "numberingConfigurations": return restoreConfiguration(key, record, dryRun);
     case "emailTemplates": return restoreEmailTemplate(record, dryRun);
+    case "emailRouting": return restoreEmailRouting(record, dryRun);
     case "complaints": return restoreComplaint(record, dryRun);
     case "capas": return restoreCapa(record, dryRun);
     case "attachments": return restoreAttachment(record, dryRun);

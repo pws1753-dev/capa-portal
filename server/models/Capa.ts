@@ -44,6 +44,8 @@ const CapaSchema = new Schema(
     type: { type: String, enum: CAPA_TYPES, default: "Corrective" },
     action: { type: String, required: true, trim: true },
     owner: { type: Schema.Types.ObjectId, ref: "User", index: true },
+    /** A Master Data employee without a portal login named as the action owner (the accountable portal user stays in `owner`). */
+    ownerEmployee: { type: Schema.Types.ObjectId, ref: "Employee", index: true },
     department: { type: Schema.Types.ObjectId, ref: "Department", index: true },
     priority: { type: Schema.Types.ObjectId, ref: "Priority" },
 

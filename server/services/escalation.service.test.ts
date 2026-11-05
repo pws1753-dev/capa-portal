@@ -24,6 +24,9 @@ let complaints: Row[] = [];
 let openCapas: Row[] = [];
 const COMMON = ["service@onepws.com", "jatin.chouhan@onepws.com", "process@onepws.com"];
 
+vi.mock("./email-routing.service", () => ({
+  getEmailRouting: async () => ({ commonCc: ["service@onepws.com", "jatin.chouhan@onepws.com", "process@onepws.com"], excludeEmails: [], defaultCommonCc: [] })
+}));
 vi.mock("../config/db", () => ({ connectDB: async () => undefined }));
 vi.mock("../models/Complaint", () => ({ Complaint: { find: () => query(complaints) } }));
 vi.mock("../models/Capa", () => ({
@@ -97,12 +100,12 @@ describe("daily TAT delay emails", () => {
   it("lists all four stages and how late the delayed ones are", async () => {
     await processEscalations();
     const b = forComplaint("B")!;
-    expect(b.data.ackStatus).toMatch(/^DELAYED by 5 days/);
-    expect(b.data.contStatus).toMatch(/^DELAYED by 3 days/);
+    expect(b.data.ackStatus).toMatch(/^DELAYED by 4 days/);
+    expect(b.data.contStatus).toMatch(/^DELAYED by 2 days/);
     expect(b.data.rcaStatus).toMatch(/^Due /);
     expect(b.data.capaStatus).toMatch(/^Due /);
     expect(b.data.delayedCount).toBe("2");
-    expect(b.data.maxDaysLate).toBe("5 days");
+    expect(b.data.maxDaysLate).toBe("4 days");
   });
 
   it("repeats every day: the de-duplication key is per complaint per date", async () => {

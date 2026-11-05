@@ -359,6 +359,8 @@ export type CapaItem = {
   type: string;
   action: string;
   owner?: string | { _id: string; name: string } | null;
+  /** A directory employee without a login named as the owner (the accountable user stays in `owner`). */
+  ownerEmployee?: string | { _id: string; name: string } | null;
   department?: string | { _id: string; name: string } | null;
   assignedAt?: string;
   dueDate: string;
@@ -375,6 +377,14 @@ export type CapaItem = {
   effectivenessRemarks?: string;
   delayReason?: string;
 };
+
+/** The name shown as a CAPA's owner: the directory employee when one was chosen, otherwise the portal user. */
+export function capaOwnerName(capa: Pick<CapaItem, "owner" | "ownerEmployee">): string {
+  for (const value of [capa.ownerEmployee, capa.owner]) {
+    if (value && typeof value === "object" && value.name) return value.name;
+  }
+  return "Unassigned";
+}
 
 export type StageTat = {
   stage: string;

@@ -4,8 +4,9 @@ import { Capa } from "../models/Capa";
 import { TATConfiguration } from "../models/configuration";
 import { DEFAULT_TAT_CONFIG } from "@shared/constants/domain";
 import { computeStageDueDates } from "../domain/tat";
+import { startOfTodayIST } from "../domain/due-day";
 import { lateText, stageDelays, stageStatusText } from "../domain/tat-delay";
-import { COMMON_CC_EMAILS } from "../lib/email-policy";
+import { getEmailRouting } from "./email-routing.service";
 import { resolveRecipients } from "./email-recipient.service";
 import { sendTemplatedEmail } from "./email.service";
 
@@ -31,6 +32,7 @@ export async function processEscalations(): Promise<EscalationRunResult> {
   let complaintsEscalated = 0;
   let capasEscalated = 0;
 
+  const { commonCc } = await getEmailRouting();
   const now = new Date();
   const todayStr = now.toISOString().slice(0, 10);
 
@@ -87,13 +89,13 @@ export async function processEscalations(): Promise<EscalationRunResult> {
 
     // CC: the common mailboxes (the department Manager and HOD are added by the mail service). Management
     // is never copied on reminders; it receives only the monthly summary report.
-    let cc = [...COMMON_CC_EMAILS];
+    let cc = [...commonCc];
 
     // A complaint with no reachable owner still has to be chased: the common mailboxes become the recipients.
     to = unique(to);
     if (to.length === 0) {
-      to = [...COMMON_CC_EMAILS];
-      cc = cc.filter((email) => !COMMON_CC_EMAILS.includes(email));
+      to = [...commonCc];
+      cc = cc.filter((email) => !commonCc.includes(email));
     }
 
     const status = Object.fromEntries(delays.map((entry) => [entry.stage, stageStatusText(entry)])) as Record<(typeof delays)[number]["stage"], string>;
@@ -128,9 +130,10 @@ export async function processEscalations(): Promise<EscalationRunResult> {
   // 2. Overdue CAPAs: same rule, Management is never copied
   const overdueCapas = await Capa.find({
     status: { $nin: ["Closed", "Completed", "Under Verification"] },
-    dueDate: { $lt: now }
+    dueDate: { $lt: startOfTodayIST(now) }
   })
     .populate("owner", "name email")
+    .populate("ownerEmployee", "name email")
     .populate("complaint", "number")
     .lean();
 
@@ -154,7 +157,7 @@ export async function processEscalations(): Promise<EscalationRunResult> {
         automated: { daysDelayed: Math.floor((now.getTime() - targetDate.getTime()) / 86400000) },
         data: {
           capaNumber: capa.number,
-          assignedTo: (capa.owner as { name?: string })?.name || "CAPA Owner",
+          assignedTo: (capa.ownerEmployee as { name?: string } | null)?.name || (capa.owner as { name?: string })?.name || "CAPA Owner",
           targetDate: targetDate.toLocaleDateString("en-IN"),
           complaintNumber: (capa.complaint as { number?: string })?.number || "N/A",
           actionUrl: `/capa/tracker`

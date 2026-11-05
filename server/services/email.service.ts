@@ -2,11 +2,12 @@ import { Types } from "mongoose";
 import { getAppUrl } from "../lib/app-url";
 import { DEFAULT_EMAIL_LOGO_URL } from "../lib/email-layout";
 import { escapeHtml, renderTemplate } from "../lib/email-template-renderer";
-import { COMMON_CC_EMAILS, EXTERNAL_ADDRESS_MESSAGE, excludesManagementByDefault, splitByEmailPolicy } from "../lib/email-policy";
+import { EXTERNAL_ADDRESS_MESSAGE, excludesManagementByDefault, splitByEmailPolicy } from "../lib/email-policy";
 import { createTransporter, fromAddress, isSmtpConfigured } from "../lib/mailer";
 import { resolveDepartmentCc, resolveRecipientChainCc } from "./email-recipient.service";
 import { getActiveTemplateByTrigger } from "./email-template.service";
 import { hasDedupeKeyBeenSent, writeEmailLog, getEmailLogById, getThreadHistory } from "./email-log.service";
+import { getEmailRouting, withoutExcluded } from "./email-routing.service";
 import { applyReminderBanner, buildReminderBanner, nextReminderCount, threadSubject } from "../domain/email-thread";
 import { Capa } from "../models/Capa";
 import { randomUUID } from "node:crypto";
@@ -138,25 +139,31 @@ export async function sendTemplatedEmail(input: SendTemplatedEmailInput): Promis
     return { status: "skipped", logId: String(skippedLog._id), message: "No active template" };
   }
 
-  const cleanRecipients = (input.recipients || []).filter(Boolean);
+  // Recipient rules an administrator maintains: extra fixed To/CC/BCC addresses on the template, the
+  // common CC list, and addresses that must never receive mail (for this template or for every email).
+  const routing = await getEmailRouting();
+  const excluded = new Set([...routing.excludeEmails, ...(template.excludeEmails ?? [])].map((email) => email.trim().toLowerCase()));
+  const uniqueLower = (emails: string[]) => Array.from(new Set(emails.map((email) => email.trim().toLowerCase()).filter(Boolean)));
+
+  const requestedTo = [...(input.recipients || []).filter(Boolean), ...splitByEmailPolicy(template.toEmails).allowed];
+  const cleanRecipients = withoutExcluded(uniqueLower(requestedTo), excluded);
   if (cleanRecipients.length === 0) {
+    const removedByRule = requestedTo.length > 0;
     const skippedLog = await writeEmailLog({
       templateKey: template.templateKey,
       triggerEvent: input.triggerEvent,
       recipients: [],
       status: "skipped",
-      errorMessage: "No valid recipient email addresses resolved",
+      errorMessage: removedByRule ? "Every recipient is on the exclusion list" : "No valid recipient email addresses resolved",
       relatedComplaintId: input.relatedComplaintId,
       relatedCapaId: input.relatedCapaId,
       dedupeKey: input.dedupeKey,
       sentBySystem: input.sentBySystem !== undefined ? input.sentBySystem : true
     });
-    return { status: "skipped", logId: String(skippedLog._id), message: "No recipients" };
+    return { status: "skipped", logId: String(skippedLog._id), message: removedByRule ? "All recipients excluded" : "No recipients" };
   }
 
   // Department-specific emails always CC the Manager and HOD addresses kept in Master Data > Employees.
-  // Management level people are copied on every complaint/CAPA email except reminders about delay,
-  // where a sender adds them only after 10 days (excludeManagement: false).
   // Automated reminders/escalations never copy Management (it gets the monthly summary only).
   const excludeManagement = input.automated ? true : (input.excludeManagement ?? excludesManagementByDefault(input.triggerEvent));
   const departmentCc = await resolveDepartmentCc({
@@ -168,15 +175,17 @@ export async function sendTemplatedEmail(input: SendTemplatedEmailInput): Promis
   // emails carry no complaint or CAPA reference, so they are never copied to anyone else.
   const isCaseEmail = Boolean(input.relatedComplaintId || input.relatedCapaId);
   const recipientChainCc = isCaseEmail ? await resolveRecipientChainCc(cleanRecipients).catch(() => [] as string[]) : [];
-  // The three common company mailboxes are on every complaint and CAPA email, whoever sent it.
-  const commonCc = isCaseEmail ? COMMON_CC_EMAILS : [];
-  const ccList = Array.from(
-    new Set([...(input.cc ?? []), ...commonCc, ...departmentCc, ...recipientChainCc].map((email) => email.trim().toLowerCase()).filter(Boolean))
+  // The common company mailboxes (editable by the administrator) are on every complaint and CAPA email.
+  const commonCc = isCaseEmail ? routing.commonCc : [];
+  const ccList = withoutExcluded(
+    uniqueLower([...(input.cc ?? []), ...commonCc, ...(template.ccRules ?? []), ...departmentCc, ...recipientChainCc]),
+    excluded
   ).filter((email) => !cleanRecipients.some((to) => to.trim().toLowerCase() === email));
   // The Manager, HOD and Management addresses above come from the directory, so they are checked too.
   const finalCc = splitByEmailPolicy(ccList);
   if (finalCc.blocked.length > 0) await recordBlockedAddresses(input, finalCc.blocked);
-  input = { ...input, cc: finalCc.allowed };
+  const finalBcc = splitByEmailPolicy(withoutExcluded(uniqueLower([...(input.bcc ?? []), ...(template.bccRules ?? [])]), excluded));
+  input = { ...input, cc: finalCc.allowed, bcc: finalBcc.allowed };
 
   const appUrl = getAppUrl();
   const today =new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });

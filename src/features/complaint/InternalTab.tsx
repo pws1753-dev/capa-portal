@@ -18,6 +18,7 @@ type Draft = {
   rootCause: string;
   rootCauseCategory: string;
   summary: string;
+  /** No longer edited in the portal; the stored value is passed through unchanged so old data is not lost. */
   findings: string;
   correctiveAction: string;
   evidence: string;
@@ -99,7 +100,7 @@ export function InternalTab({ complaint, canEdit }: { complaint: ComplaintDetail
             <Textarea rows={3} value={draft.d0} disabled={readOnly} onChange={(event) => setDraft({ ...draft, d0: event.target.value })} />
           </Field>
           <Field label="Interim containment actions" required hint="Required before the Containment stage can be completed.">
-            <ActionRowsEditor rows={draft.d3Actions} onChange={(rows) => setDraft({ ...draft, d3Actions: rows })} readOnly={readOnly} />
+            <ActionRowsEditor company={complaint.company} rows={draft.d3Actions} onChange={(rows) => setDraft({ ...draft, d3Actions: rows })} readOnly={readOnly} />
           </Field>
           <div className="flex flex-wrap gap-2">
             <StatusBadge tone={draft.d0.trim() ? "green" : "amber"}>Immediate response {draft.d0.trim() ? "recorded" : "missing"}</StatusBadge>
@@ -117,14 +118,9 @@ export function InternalTab({ complaint, canEdit }: { complaint: ComplaintDetail
             <Textarea rows={3} value={draft.problem} disabled={readOnly} onChange={(event) => setDraft({ ...draft, problem: event.target.value })} />
           </Field>
 
-          <div className="grid gap-3 lg:grid-cols-2">
-            <Field label="Investigation summary">
-              <Textarea rows={4} value={draft.summary} disabled={readOnly} onChange={(event) => setDraft({ ...draft, summary: event.target.value })} />
-            </Field>
-            <Field label="Findings">
-              <Textarea rows={4} value={draft.findings} disabled={readOnly} onChange={(event) => setDraft({ ...draft, findings: event.target.value })} />
-            </Field>
-          </div>
+          <Field label="Investigation summary">
+            <Textarea rows={4} value={draft.summary} disabled={readOnly} onChange={(event) => setDraft({ ...draft, summary: event.target.value })} />
+          </Field>
 
           <WhyChainEditor
             title="5-Why analysis"

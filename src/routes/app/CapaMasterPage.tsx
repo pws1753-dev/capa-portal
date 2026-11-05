@@ -12,7 +12,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useToast } from "@/components/ui/toast-context";
 import { downloadSheet } from "@/lib/excel";
 import { formatDate, statusTone } from "@/lib/format";
-import { useCapas, useMasterBootstrap, type CapaItem } from "@/services/queries";
+import { capaOwnerName, useCapas, useMasterBootstrap, type CapaItem } from "@/services/queries";
 
 export function CapaMasterPage() {
   const toast = useToast();
@@ -65,7 +65,7 @@ export function CapaMasterPage() {
       Company: typeof c.company === "object" ? c.company?.name : c.company ?? "—",
       Type: c.type,
       Action: c.action,
-      Owner: typeof c.owner === "object" ? c.owner?.name : c.owner ?? "Unassigned",
+      Owner: capaOwnerName(c),
       Department: typeof c.department === "object" ? c.department?.name : c.department ?? "—",
       "Assigned Date": formatDate(c.assignedAt),
       "Target Due Date": formatDate(c.dueDate),
@@ -126,7 +126,7 @@ export function CapaMasterPage() {
       key: "owner",
       header: "Owner",
       render: (row) => {
-        const ownerName = typeof row.owner === "object" ? row.owner?.name : row.owner ?? "Unassigned";
+        const ownerName = capaOwnerName(row);
         return <span className="text-xs text-slate-700 font-medium">{ownerName}</span>;
       }
     },

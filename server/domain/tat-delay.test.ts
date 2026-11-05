@@ -11,7 +11,7 @@ const dues = {
 
 describe("TAT delay detection", () => {
   it("marks every incomplete stage past its due date as delayed, not only the first", () => {
-    const delays = stageDelays(dues, {}, at("2026-10-20T00:00:00Z"));
+    const delays = stageDelays(dues, {}, at("2026-10-20T18:30:00Z"));
     expect(delays.map((entry) => entry.delayed)).toEqual([true, true, true, true]);
     expect(delays[0].overdueHours).toBe(19 * 24);
     expect(delays[3].overdueHours).toBe(5 * 24);
@@ -26,6 +26,12 @@ describe("TAT delay detection", () => {
   it("does not flag a stage that is not yet due", () => {
     const delays = stageDelays(dues, {}, at("2026-10-05T00:00:00Z"));
     expect(delays.map((entry) => entry.delayed)).toEqual([true, true, false, false]);
+  });
+
+  it("is not late on the due date itself, only after that day ends", () => {
+    // ack is due 1 Oct 05:30 IST; the day ends at 18:30 UTC.
+    expect(stageDelays(dues, {}, at("2026-10-01T12:00:00Z"))[0].delayed).toBe(false);
+    expect(stageDelays(dues, {}, at("2026-10-01T18:31:00Z"))[0].delayed).toBe(true);
   });
 
   it("is all clear once every stage is complete", () => {
@@ -54,7 +60,7 @@ describe("delay wording", () => {
     const [ack, , , capa] = stageDelays(dues, { ack: at("2026-10-02T00:00:00Z") }, at("2026-10-10T00:00:00Z"));
     expect(stageStatusText(ack)).toMatch(/^Completed on /);
     expect(stageStatusText(capa)).toMatch(/^Due /);
-    const late = stageDelays(dues, {}, at("2026-10-20T00:00:00Z"))[0];
+    const late = stageDelays(dues, {}, at("2026-10-20T18:30:00Z"))[0];
     expect(stageStatusText(late)).toMatch(/^DELAYED by 19 days \(was due /);
   });
 });

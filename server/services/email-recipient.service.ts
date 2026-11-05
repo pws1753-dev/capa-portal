@@ -187,6 +187,11 @@ export async function resolveRecipients(options: RecipientResolutionOptions): Pr
     const email = normalizeEmail(capaOwner?.email);
     if (email) recipientSet.add(email);
   }
+  if (roles.includes("CAPA Owner") && capaDoc?.ownerEmployee) {
+    const ownerEmployee = await Employee.findOne({ _id: capaDoc.ownerEmployee, active: { $ne: false } }).select("email").lean();
+    const email = normalizeEmail(ownerEmployee?.email);
+    if (email) recipientSet.add(email);
+  }
 
   // 5. Resolve Department Head & Manager via Employee records
   if ((roles.includes("Department Head") || roles.includes("Manager")) && effectiveDepartmentId) {

@@ -7,14 +7,21 @@ const resolveDepartmentCc = vi.fn(async (_ref: { excludeManagement?: boolean }) 
 const resolveRecipientChainCc = vi.fn(async () => [] as string[]);
 const getThreadHistory = vi.fn(async (_key: string) => [] as Record<string, unknown>[]);
 
+let routing = { commonCc: ["service@onepws.com", "jatin.chouhan@onepws.com", "process@onepws.com"], excludeEmails: [] as string[], defaultCommonCc: [] as string[] };
+vi.mock("./email-routing.service", async () => {
+  const actual = await vi.importActual<typeof import("./email-routing.service")>("./email-routing.service");
+  return { ...actual, getEmailRouting: async () => routing };
+});
 vi.mock("../lib/mailer", () => ({
   createTransporter: () => ({ sendMail }),
   fromAddress: () => "portal@onepws.com",
   isSmtpConfigured: () => true
 }));
 vi.mock("../lib/app-url", () => ({ getAppUrl: () => "https://care.onepws.com" }));
+let templateExtras: Record<string, unknown> = {};
 vi.mock("./email-template.service", () => ({
   getActiveTemplateByTrigger: async () => ({
+    ...templateExtras,
     templateKey: "t",
     templateName: "T",
     subject: "Complaint {{complaintNumber}}",
@@ -41,6 +48,8 @@ const COMMON = ["service@onepws.com", "jatin.chouhan@onepws.com", "process@onepw
 beforeEach(() => {
   sendMail.mockClear();
   writeEmailLog.mockClear();
+  templateExtras = {};
+  routing = { commonCc: ["service@onepws.com", "jatin.chouhan@onepws.com", "process@onepws.com"], excludeEmails: [], defaultCommonCc: [] };
   getThreadHistory.mockReset();
   getThreadHistory.mockResolvedValue([]);
   resolveDepartmentCc.mockResolvedValue([]);
@@ -161,5 +170,40 @@ describe("one email thread per complaint", () => {
     getThreadHistory.mockResolvedValue([{ subject: "Complaint PWS-1", messageId: "<root@onepws.com>", triggerEvent: "COMPLAINT_REGISTERED", createdAt: new Date(), automated: false }]);
     await sendTemplatedEmail({ ...base, recipients: ["owner@onepws.com"], automated: { daysDelayed: 0 } });
     expect(String((sendMail.mock.calls[0][0] as Record<string, unknown>).html)).toContain("Reminder #1");
+  });
+});
+
+describe("recipient rules kept by the administrator", () => {
+  it("never emails an address on the global exclusion list, in To, CC or BCC", async () => {
+    routing.excludeEmails = ["puneet@onepws.com"];
+    resolveDepartmentCc.mockResolvedValue(["puneet@onepws.com", "ritik@onepws.com"]);
+    await sendTemplatedEmail({ ...base, recipients: ["owner@onepws.com", "Puneet@onepws.com"], cc: ["puneet@onepws.com"] });
+    const mail = sendMail.mock.calls[0][0] as Mail;
+    expect(mail.to).toEqual(["owner@onepws.com"]);
+    expect(mail.cc).not.toContain("puneet@onepws.com");
+    expect(mail.cc).toContain("ritik@onepws.com");
+  });
+
+  it("uses the editable common CC list instead of the built-in one", async () => {
+    routing.commonCc = ["quality@onepws.com"];
+    await sendTemplatedEmail({ ...base, recipients: ["owner@onepws.com"] });
+    expect((sendMail.mock.calls[0][0] as Mail).cc).toEqual(["quality@onepws.com"]);
+  });
+
+  it("adds a template's own To, CC and BCC addresses and honours its exclusions", async () => {
+    templateExtras = { toEmails: ["extra.to@onepws.com"], ccRules: ["extra.cc@onepws.com"], bccRules: ["audit@onepws.com"], excludeEmails: ["service@onepws.com"] };
+    await sendTemplatedEmail({ ...base, recipients: ["owner@onepws.com"] });
+    const mail = sendMail.mock.calls[0][0] as Mail;
+    expect(mail.to).toEqual(["owner@onepws.com", "extra.to@onepws.com"]);
+    expect(mail.cc).toContain("extra.cc@onepws.com");
+    expect(mail.cc).not.toContain("service@onepws.com");
+    expect(mail.bcc).toEqual(["audit@onepws.com"]);
+  });
+
+  it("skips the email when every recipient is excluded", async () => {
+    routing.excludeEmails = ["owner@onepws.com"];
+    const result = await sendTemplatedEmail({ ...base, recipients: ["owner@onepws.com"] });
+    expect(result.status).toBe("skipped");
+    expect(sendMail).not.toHaveBeenCalled();
   });
 });

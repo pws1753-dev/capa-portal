@@ -1,4 +1,5 @@
 import { MANAGEMENT_ESCALATION_DAYS, WORKFLOW_STAGES, type WorkflowStage } from "@shared/constants/domain";
+import { endOfDueDay } from "./due-day";
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -24,7 +25,8 @@ export function stageDelays(
 ): StageDelay[] {
   return WORKFLOW_STAGES.map((stage) => {
     const completedAt = completed[stage] ? new Date(completed[stage] as Date) : null;
-    const lateMs = now.getTime() - dues[stage].getTime();
+    // Late only after the due date's day has ended; hours are counted from then.
+    const lateMs = now.getTime() - endOfDueDay(dues[stage]).getTime();
     const delayed = !completedAt && lateMs > 0;
     return { stage, completedAt, dueAt: dues[stage], overdueHours: delayed ? Math.floor(lateMs / HOUR_MS) : 0, delayed };
   });

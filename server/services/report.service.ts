@@ -75,6 +75,7 @@ async function capaQuery(context: ReportContext, extra: Record<string, unknown> 
     .populate("company", "name code")
     .populate("complaint", "number type customer status")
     .populate("owner", "name")
+    .populate("ownerEmployee", "name")
     .populate("department", "name")
     .populate("priority", "name")
     .sort({ dueDate: 1 })
@@ -216,7 +217,7 @@ export const REPORT_DEFINITIONS: ReportDefinition[] = [
         Company: name(capa.company),
         Type: String(capa.type ?? ""),
         Action: String(capa.action ?? ""),
-        Owner: name(capa.owner),
+        Owner: name(capa.ownerEmployee) || name(capa.owner),
         Department: name(capa.department),
         Assigned: date(capa.assignedAt),
         Due: date(capa.dueDate),
@@ -245,7 +246,7 @@ export const REPORT_DEFINITIONS: ReportDefinition[] = [
         Company: name(capa.company),
         Type: String(capa.type ?? ""),
         Action: String(capa.action ?? ""),
-        Owner: name(capa.owner),
+        Owner: name(capa.ownerEmployee) || name(capa.owner),
         Department: name(capa.department),
         Due: date(capa.dueDate),
         Status: String(capa.status ?? ""),
@@ -464,7 +465,7 @@ export async function eightDReportData(complaintId: string, user: ApiUser | unde
     .lean();
   if (!complaint) throw httpError(404, "Complaint not found");
 
-  const capas = await Capa.find({ complaint: complaintId }).populate("owner", "name").populate("department", "name").sort({ sequence: 1 }).lean();
+  const capas = await Capa.find({ complaint: complaintId }).populate("owner", "name").populate("ownerEmployee", "name").populate("department", "name").sort({ sequence: 1 }).lean();
 
   return { complaint, capas };
 }
@@ -527,7 +528,7 @@ export function eightDExcelSheets(data: Awaited<ReturnType<typeof eightDReportDa
     "CAPA No": String(capa.number ?? ""),
     Type: String(capa.type ?? ""),
     Action: String(capa.action ?? ""),
-    Owner: name(capa.owner),
+    Owner: name(capa.ownerEmployee) || name(capa.owner),
     Department: name(capa.department),
     Due: date(capa.dueDate),
     Completed: date(capa.completedAt),

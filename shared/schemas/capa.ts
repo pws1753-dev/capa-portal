@@ -2,10 +2,11 @@ import { z } from "zod";
 import { CAPA_EFFECTIVENESS, CAPA_STATUSES, CAPA_TYPES, EVIDENCE_REVIEW_STATUSES } from "../constants/domain";
 import { listQuerySchema, objectIdSchema } from "./common";
 
-export const capaCreateSchema = z.object({
+const capaBaseSchema = z.object({
   type: z.enum(CAPA_TYPES).default("Corrective"),
   action: z.string().trim().min(5, "Describe the action in at least 5 characters").max(4000),
-  owner: objectIdSchema,
+  owner: objectIdSchema.optional(),
+  ownerEmployee: objectIdSchema.optional(),
   department: objectIdSchema.optional(),
   priority: objectIdSchema.optional(),
   dueDate: z.coerce.date(),
@@ -13,7 +14,12 @@ export const capaCreateSchema = z.object({
   evidence: z.string().trim().max(4000).optional().default("")
 });
 
-export const capaUpdateSchema = capaCreateSchema.partial().extend({
+export const capaCreateSchema = capaBaseSchema.refine((value) => Boolean(value.owner || value.ownerEmployee), {
+  message: "Select an owner",
+  path: ["owner"]
+});
+
+export const capaUpdateSchema = capaBaseSchema.partial().extend({
   completedAt: z.coerce.date().optional(),
   delayReason: z.string().trim().max(200).optional()
 });

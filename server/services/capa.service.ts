@@ -10,8 +10,10 @@ import {
   validateEvidenceReview
 } from "../domain/capa-rules";
 import { canEditCapa, canReviewCapaEvidence, canSeeCompany, canVerifyEffectiveness, hasPermission, isMasterAdmin } from "../domain/rbac";
+import { startOfTodayIST } from "../domain/due-day";
 import { Capa, type CapaHydrated } from "../models/Capa";
 import { Complaint } from "../models/Complaint";
+import { Employee } from "../models/Employee";
 import { loadComplaintContext, reopenComplaint, requireActor } from "./complaint.service";
 import { toDomainCapa } from "./mappers";
 import { notify } from "./notification.service";
@@ -52,7 +54,7 @@ export async function listCapas(query: CapaListQuery, user: ApiUser | undefined)
   if (query.effectiveness) filter.effectiveness = query.effectiveness;
   if (query.evidenceReview) filter["evidenceReview.status"] = query.evidenceReview;
   if (query.overdue) {
-    filter.dueDate = { $lt: new Date() };
+    filter.dueDate = { $lt: startOfTodayIST() };
     filter.status = { $nin: ["Closed", "Completed"] };
   }
   if (query.dueFrom || query.dueTo) {
@@ -78,6 +80,7 @@ export async function listCapas(query: CapaListQuery, user: ApiUser | undefined)
       .skip((query.page - 1) * query.pageSize)
       .limit(query.pageSize)
       .populate("owner", "name username")
+      .populate("ownerEmployee", "name")
       .populate("complaint", "number type status")
       .populate("company", "name code")
       .populate("department", "name")
@@ -86,6 +89,22 @@ export async function listCapas(query: CapaListQuery, user: ApiUser | undefined)
   ]);
 
   return { rows, total };
+}
+
+/**
+ * Resolves who owns a CAPA action. A Master Data employee without a login can be named as owner (the
+ * acting portal user stays the accountable `owner`); a portal user is stored as `owner` alone.
+ */
+async function resolveCapaOwner(
+  input: { owner?: unknown; ownerEmployee?: unknown },
+  companyId: Types.ObjectId,
+  actorId: string | undefined
+): Promise<{ owner?: unknown; ownerEmployee?: unknown } | null> {
+  if (input.owner) return { owner: input.owner, ownerEmployee: undefined };
+  if (!input.ownerEmployee) return null;
+  const employee = await Employee.findOne({ _id: input.ownerEmployee, company: companyId, active: true }).select("_id").lean();
+  if (!employee) throw httpError(400, "The selected employee is not active in this company");
+  return { owner: actorId, ownerEmployee: employee._id };
 }
 
 export async function createCapa(complaintId: string, input: CapaCreateInput, user: ApiUser | undefined) {
@@ -99,6 +118,9 @@ export async function createCapa(complaintId: string, input: CapaCreateInput, us
     throw httpError(403, "You do not have permission to add CAPAs");
   }
 
+  const resolvedOwner = await resolveCapaOwner(input, context.doc.company, user?.id);
+  if (!resolvedOwner) throw httpError(400, "Select an owner");
+
   const sequence = (await Capa.countDocuments({ complaint: context.doc._id })) + 1;
   const number = await nextCapaNumber(context.doc.company, context.doc.number, sequence);
 
@@ -109,7 +131,8 @@ export async function createCapa(complaintId: string, input: CapaCreateInput, us
     sequence,
     type: input.type,
     action: input.action,
-    owner: input.owner,
+    owner: resolvedOwner.owner,
+    ownerEmployee: resolvedOwner.ownerEmployee,
     department: input.department ?? context.doc.responsibleDept,
     priority: input.priority ?? context.doc.priority,
     dueDate: input.dueDate,
@@ -126,7 +149,8 @@ export async function createCapa(complaintId: string, input: CapaCreateInput, us
   });
 
   await notify({
-    recipients: [capa.owner].filter(Boolean) as Types.ObjectId[],
+    // An employee owner has no portal login; they are reached by email below.
+    recipients: (capa.ownerEmployee ? [] : [capa.owner]).filter(Boolean) as Types.ObjectId[],
     message: `CAPA ${capa.number} assigned to you (due ${new Date(capa.dueDate).toISOString().slice(0, 10)})`,
     category: "capa",
     entityType: "Capa",
@@ -177,11 +201,12 @@ export async function updateCapa(
     if (issues.length > 0) throw businessRuleError("This CAPA status change is not allowed", issues);
   }
 
-  const before = { status: capa.status, owner: String(capa.owner), dueDate: capa.dueDate };
+  const before = { status: capa.status, owner: String(capa.owner), ownerEmployee: capa.ownerEmployee ? String(capa.ownerEmployee) : null, dueDate: capa.dueDate };
+  const resolvedOwner = await resolveCapaOwner(input, capa.company, capa.owner ? String(capa.owner) : user?.id);
   capa.set({
     ...(input.type ? { type: input.type } : {}),
     ...(input.action ? { action: input.action } : {}),
-    ...(input.owner ? { owner: input.owner } : {}),
+    ...(resolvedOwner ? { owner: resolvedOwner.owner, ownerEmployee: resolvedOwner.ownerEmployee ?? null } : {}),
     ...(input.department ? { department: input.department } : {}),
     ...(input.priority ? { priority: input.priority } : {}),
     ...(input.dueDate ? { dueDate: input.dueDate } : {}),

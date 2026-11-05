@@ -1,4 +1,4 @@
-import { type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AlertTriangle, ArrowDown, ArrowUp, ChevronLeft, ChevronRight, ChevronsUpDown } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { Button } from "./Button";
@@ -35,6 +35,57 @@ type DataTableProps<T> = {
   /** Left-edge accent for a row, applied to the first cell on desktop and the card on mobile. */
   rowAccentClassName?: (row: T) => string | undefined;
 };
+
+/**
+ * Horizontal scroll area with a scrollbar above the table as well as below it, so a wide list can be
+ * scrolled without first scrolling to the bottom of a long page. The two bars stay in step.
+ */
+function DualScroll({ children }: { children: ReactNode }) {
+  const topRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const syncing = useRef(false);
+  const [contentWidth, setContentWidth] = useState(0);
+  const [overflowing, setOverflowing] = useState(false);
+
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    const measure = () => {
+      setContentWidth(body.scrollWidth);
+      setOverflowing(body.scrollWidth > body.clientWidth + 1);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(body);
+    if (body.firstElementChild) observer.observe(body.firstElementChild);
+    return () => observer.disconnect();
+  }, []);
+
+  function follow(source: HTMLDivElement | null, target: HTMLDivElement | null) {
+    if (!source || !target || syncing.current) return;
+    syncing.current = true;
+    target.scrollLeft = source.scrollLeft;
+    requestAnimationFrame(() => {
+      syncing.current = false;
+    });
+  }
+
+  return (
+    <>
+      <div
+        ref={topRef}
+        onScroll={() => follow(topRef.current, bodyRef.current)}
+        className={cn("scroll-visible overflow-x-auto overflow-y-hidden border-b border-slate-200", !overflowing && "hidden")}
+        aria-hidden="true"
+      >
+        <div style={{ width: contentWidth, height: 1 }} />
+      </div>
+      <div ref={bodyRef} onScroll={() => follow(bodyRef.current, topRef.current)} className="scroll-visible overflow-x-auto overscroll-x-contain">
+        {children}
+      </div>
+    </>
+  );
+}
 
 export function DataTable<T>({
   columns,
@@ -80,7 +131,7 @@ export function DataTable<T>({
     <div>
       {/* Desktop and tablet: a real table that scrolls inside its own container. */}
       <div className="hidden max-w-full overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm md:block">
-        <div className="overflow-x-auto overscroll-x-contain">
+        <DualScroll>
           <table className="w-full min-w-max border-collapse text-sm">
             {caption ? <caption className="sr-only">{caption}</caption> : null}
             <thead>
@@ -147,7 +198,7 @@ export function DataTable<T>({
               ))}
             </tbody>
           </table>
-        </div>
+        </DualScroll>
       </div>
 
       {/* Mobile: one card per record so nothing is clipped or hidden behind a scrollbar. */}

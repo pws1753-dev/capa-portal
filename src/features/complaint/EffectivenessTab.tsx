@@ -11,6 +11,7 @@ import { useToast } from "@/components/ui/toast-context";
 import { formatDate, formatDateTime, statusTone } from "@/lib/format";
 import {
   useApiMutation,
+  capaOwnerName,
   usePermissions,
   type CapaItem,
   type ComplaintDetail
@@ -173,8 +174,7 @@ export function EffectivenessTab({
             {capas.map((capa) => {
               const isCompleted = capa.status === "Completed" || Boolean(capa.completedAt);
               const isVerified = Boolean(capa.effectiveness);
-              const ownerName =
-                typeof capa.owner === "object" && capa.owner ? capa.owner.name : "Unassigned";
+              const ownerName = capaOwnerName(capa);
 
               return (
                 <div

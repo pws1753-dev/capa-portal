@@ -22,8 +22,10 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useToast } from "@/components/ui/toast-context";
 import { downloadSheet } from "@/lib/excel";
 import { errorText } from "@/lib/errors";
+import { isPastDueDay } from "@/lib/due-day";
 import { formatDate, statusTone } from "@/lib/format";
 import {
+  capaOwnerName,
   useApiMutation,
   useCapas,
   useMasterBootstrap,
@@ -118,7 +120,7 @@ export function CapaTrackerPage() {
       "Complaint Number": typeof c.complaint === "object" ? c.complaint?.number : c.complaint,
       Type: c.type,
       Action: c.action,
-      Owner: typeof c.owner === "object" ? c.owner?.name : c.owner ?? "Unassigned",
+      Owner: capaOwnerName(c),
       Department: typeof c.department === "object" ? c.department?.name : c.department ?? "—",
       Status: c.status,
       "Due Date": formatDate(c.dueDate),
@@ -173,7 +175,7 @@ export function CapaTrackerPage() {
       key: "owner",
       header: "Owner / Dept",
       render: (row) => {
-        const ownerName = typeof row.owner === "object" ? row.owner?.name : row.owner ?? "Unassigned";
+        const ownerName = capaOwnerName(row);
         const deptName = typeof row.department === "object" ? row.department?.name : row.department ?? "—";
         return (
           <div className="text-xs">
@@ -188,7 +190,7 @@ export function CapaTrackerPage() {
       header: "Target SLA",
       render: (row) => {
         const isPastDue =
-          !row.completedAt && row.dueDate && new Date(row.dueDate).getTime() < Date.now();
+          !row.completedAt && row.dueDate && isPastDueDay(row.dueDate);
         return (
           <div className="text-xs">
             <span className={isPastDue ? "font-bold text-brand-red" : "text-slate-700"}>
@@ -473,7 +475,7 @@ export function CapaTrackerPage() {
           <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs space-y-1.5 text-slate-700">
             <p className="font-semibold text-slate-900">Action: {reviewTarget?.action}</p>
             <p>
-              Owner: <strong>{typeof reviewTarget?.owner === "object" ? reviewTarget.owner?.name : reviewTarget?.owner}</strong>
+              Owner: <strong>{reviewTarget ? capaOwnerName(reviewTarget) : ""}</strong>
             </p>
             <p>
               Completed Date: <strong>{formatDate(reviewTarget?.completedAt)}</strong>

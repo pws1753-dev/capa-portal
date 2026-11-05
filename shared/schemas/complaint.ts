@@ -108,7 +108,7 @@ export const stageCompleteSchema = z.object({
 
 const actionRowSchema = z.object({
   action: z.string().trim().max(2000).optional().default(""),
-  resp: z.string().trim().max(160).optional().default(""),
+  resp: z.string().trim().max(1000).optional().default(""),
   target: z.string().trim().max(40).optional().default(""),
   status: z.string().trim().max(40).optional().default("Open"),
   remarks: z.string().trim().max(2000).optional().default(""),
@@ -219,7 +219,9 @@ export const internalInvestigationSchema = z.object({
 export const closeComplaintSchema = z.object({
   closureRemarks: z.string().trim().min(5, "Closure remarks are required").max(4000),
   noRepeatConfirmed: z.boolean().default(false),
-  force: z.boolean().default(false)
+  force: z.boolean().default(false),
+  /** Master Admin only: close the complaint even when mandatory items are missing or CAPAs are open. */
+  forceCloseAll: z.boolean().default(false)
 });
 
 export const reopenComplaintSchema = z.object({

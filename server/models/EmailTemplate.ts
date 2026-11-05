@@ -18,8 +18,13 @@ const EmailTemplateSchema = new Schema(
     isActive: { type: Boolean, default: true, index: true },
     triggerEvent: { type: String, required: true, index: true },
     allowedRolesToReceive: [{ type: String }],
+    /** Extra fixed To addresses. */
+    toEmails: [{ type: String }],
+    /** Extra fixed CC addresses. */
     ccRules: [{ type: String }],
     bccRules: [{ type: String }],
+    /** Addresses never sent this email, wherever they would otherwise come from. */
+    excludeEmails: [{ type: String }],
     createdBy: { type: Schema.Types.ObjectId, ref: "User" },
     updatedBy: { type: Schema.Types.ObjectId, ref: "User" }
   },

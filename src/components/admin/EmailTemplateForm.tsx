@@ -8,6 +8,8 @@ import { EMAIL_TRIGGER_EVENTS, EMAIL_TRIGGER_LABELS, type EmailTriggerEvent } fr
 import { api } from "@/lib/api";
 import { errorText } from "@/lib/errors";
 import { EmailTemplateVariableHelper } from "./EmailTemplateVariableHelper";
+import { EmailListEditor } from "./EmailListEditor";
+import { EMAIL_DEFAULT_RECIPIENTS } from "@shared/constants/email-recipients";
 
 export type TemplateData = {
   _id?: string;
@@ -19,6 +21,11 @@ export type TemplateData = {
   textBody: string;
   supportedVariables: string[];
   isActive: boolean;
+  /** Extra fixed To / CC / BCC addresses, and addresses never sent this email. */
+  toEmails?: string[];
+  ccRules?: string[];
+  bccRules?: string[];
+  excludeEmails?: string[];
 };
 
 type EmailTemplateFormProps = {
@@ -40,7 +47,11 @@ export function EmailTemplateForm({ initialData, onClose, onPreview }: EmailTemp
     htmlBody: initialData?.htmlBody || "",
     textBody: initialData?.textBody || "",
     supportedVariables: initialData?.supportedVariables || [],
-    isActive: initialData?.isActive !== undefined ? initialData.isActive : true
+    isActive: initialData?.isActive !== undefined ? initialData.isActive : true,
+    toEmails: initialData?.toEmails ?? [],
+    ccRules: initialData?.ccRules ?? [],
+    bccRules: initialData?.bccRules ?? [],
+    excludeEmails: initialData?.excludeEmails ?? []
   });
 
   const [activeTab, setActiveTab] = useState<"html" | "text">("html");
@@ -58,7 +69,11 @@ export function EmailTemplateForm({ initialData, onClose, onPreview }: EmailTemp
             subject: form.subject,
             htmlBody: form.htmlBody,
             textBody: form.textBody,
-            isActive: form.isActive
+            isActive: form.isActive,
+            toEmails: form.toEmails,
+            ccRules: form.ccRules,
+            bccRules: form.bccRules,
+            excludeEmails: form.excludeEmails
           })
         });
       }
@@ -149,6 +164,29 @@ export function EmailTemplateForm({ initialData, onClose, onPreview }: EmailTemp
             />
             <span>Active Template (Enabled for automated delivery)</span>
           </label>
+        </div>
+      </div>
+
+      <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
+        <div>
+          <p className="text-sm font-bold text-brand-charcoal">Recipients (To / CC)</p>
+          <p className="mt-0.5 text-xs text-slate-500">
+            Automatic recipients for this event: <strong>To</strong> {EMAIL_DEFAULT_RECIPIENTS[form.triggerEvent]?.to || "—"}
+            {" · "}
+            <strong>CC</strong> {EMAIL_DEFAULT_RECIPIENTS[form.triggerEvent]?.cc || "—"}. Add or remove addresses below; changes apply to every email sent with this template.
+          </p>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          <EmailListEditor label="Also send To" value={form.toEmails ?? []} onChange={(toEmails) => setForm({ ...form, toEmails })} />
+          <EmailListEditor label="Also CC" value={form.ccRules ?? []} onChange={(ccRules) => setForm({ ...form, ccRules })} />
+          <EmailListEditor label="Also BCC" value={form.bccRules ?? []} onChange={(bccRules) => setForm({ ...form, bccRules })} />
+          <EmailListEditor
+            label="Remove these addresses from this email"
+            hint="Never sent this email, wherever the address comes from (including Manager/HOD from the Employee Directory)."
+            value={form.excludeEmails ?? []}
+            onChange={(excludeEmails) => setForm({ ...form, excludeEmails })}
+            tone="danger"
+          />
         </div>
       </div>
 

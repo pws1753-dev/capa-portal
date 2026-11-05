@@ -79,6 +79,10 @@ export async function getActiveTemplateByTrigger(triggerEvent: string): Promise<
   htmlBody: string;
   textBody: string;
   supportedVariables: string[];
+  toEmails?: string[];
+  ccRules?: string[];
+  bccRules?: string[];
+  excludeEmails?: string[];
 } | null> {
   await connectDB();
   const doc = await EmailTemplate.findOne({ triggerEvent, isActive: true }).lean();
@@ -98,7 +102,11 @@ export async function getActiveTemplateByTrigger(triggerEvent: string): Promise<
     return doc;
   }
 
-  // Fallback to in-memory default if DB has no active template
+  // A template an administrator switched off must stay off. The built-in default is used only when no
+  // template exists in the database for this event at all (a fresh install before seeding).
+  const switchedOff = await EmailTemplate.exists({ triggerEvent, isActive: false });
+  if (switchedOff) return null;
+
   const fallback = DEFAULT_EMAIL_TEMPLATES.find((t) => t.triggerEvent === triggerEvent);
   return fallback || null;
 }
@@ -139,6 +147,8 @@ export async function updateEmailTemplate(id: string, input: EmailTemplateUpdate
   if (input.triggerEvent !== undefined) existing.triggerEvent = input.triggerEvent;
   if (input.isActive !== undefined) existing.isActive = input.isActive;
   if (input.allowedRolesToReceive !== undefined) existing.allowedRolesToReceive = input.allowedRolesToReceive;
+  if (input.toEmails !== undefined) existing.toEmails = input.toEmails;
+  if (input.excludeEmails !== undefined) existing.excludeEmails = input.excludeEmails;
   if (input.ccRules !== undefined) existing.ccRules = input.ccRules;
   if (input.bccRules !== undefined) existing.bccRules = input.bccRules;
 

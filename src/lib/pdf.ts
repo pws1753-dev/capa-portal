@@ -68,6 +68,7 @@ export type PdfCapa = {
   type?: string;
   action?: string;
   owner?: { name?: string } | null;
+  ownerEmployee?: { name?: string } | null;
   department?: { name?: string } | null;
   dueDate?: string;
   completedAt?: string | null;
@@ -407,7 +408,6 @@ export function generateComplaintPdf(complaint: PdfComplaint, capas: PdfCapa[]) 
     sectionTitle(doc, cursor, "INV", "Internal investigation");
     paragraph(doc, cursor, "Problem statement", complaint.d2?.what);
     paragraph(doc, cursor, "Investigation summary", complaint.internalInvestigation?.summary);
-    paragraph(doc, cursor, "Findings", complaint.internalInvestigation?.findings);
     whyChain(doc, cursor, "5-Why", complaint.fiveWhy?.singleChain);
     paragraph(doc, cursor, "Root cause", complaint.d4Occurrence);
     paragraph(doc, cursor, "Root cause category", complaint.rootCauseCategory);
@@ -426,7 +426,7 @@ export function generateComplaintPdf(complaint: PdfComplaint, capas: PdfCapa[]) 
         capa.number,
         capa.type ?? "",
         capa.action ?? "",
-        capa.owner?.name ?? "",
+        capa.ownerEmployee?.name ?? capa.owner?.name ?? "",
         formatDate(capa.dueDate, "—"),
         capa.status ?? "",
         capa.evidenceReview?.status ?? "Pending",

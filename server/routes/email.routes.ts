@@ -5,6 +5,7 @@ import { requireUser } from "../middleware/auth";
 import { getSmtpStatus, verifySmtpConnection } from "../lib/mailer";
 import {
   emailLogQuerySchema,
+  emailRoutingSchema,
   emailTemplateSchema,
   emailTemplateUpdateSchema,
   retryEmailSchema,
@@ -20,6 +21,7 @@ import {
   previewEmailTemplate,
   updateEmailTemplate
 } from "../services/email-template.service";
+import { getEmailRouting, updateEmailRouting } from "../services/email-routing.service";
 import { queryEmailLogs, getEmailLogById } from "../services/email-log.service";
 import { retryEmail, sendRawTestEmail, sendTemplatedEmail } from "../services/email.service";
 import { processEscalations } from "../services/escalation.service";
@@ -43,6 +45,25 @@ emailRouter.get(
   asyncHandler(async (req, res) => {
     assertMasterAdmin(req);
     return ok(res, getSmtpStatus());
+  })
+);
+
+emailRouter.get(
+  "/routing",
+  requireUser,
+  asyncHandler(async (req, res) => {
+    assertMasterAdmin(req);
+    return ok(res, await getEmailRouting());
+  })
+);
+
+emailRouter.put(
+  "/routing",
+  requireUser,
+  asyncHandler(async (req, res) => {
+    assertMasterAdmin(req);
+    const input = emailRoutingSchema.parse(req.body);
+    return ok(res, await updateEmailRouting(input, req.user));
   })
 );
 

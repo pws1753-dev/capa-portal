@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { EMAIL_TRIGGER_EVENTS } from "../constants/domain";
 
+const emailListSchema = z.array(z.string().trim().toLowerCase().email("Enter valid email addresses")).max(50).default([]);
+
 export const emailTemplateSchema = z.object({
   templateKey: z
     .string()
@@ -15,11 +17,22 @@ export const emailTemplateSchema = z.object({
   supportedVariables: z.array(z.string()).default([]),
   isActive: z.boolean().default(true),
   allowedRolesToReceive: z.array(z.string()).default([]),
-  ccRules: z.array(z.string()).default([]),
-  bccRules: z.array(z.string()).default([])
+  /** Extra fixed To addresses for this email. */
+  toEmails: emailListSchema,
+  /** Extra fixed CC addresses for this email. */
+  ccRules: emailListSchema,
+  bccRules: emailListSchema,
+  /** Addresses removed from this email wherever they would otherwise come from. */
+  excludeEmails: emailListSchema
 });
 
 export type EmailTemplateInput = z.infer<typeof emailTemplateSchema>;
+
+export const emailRoutingSchema = z.object({
+  commonCc: emailListSchema,
+  excludeEmails: emailListSchema
+});
+export type EmailRoutingInput = z.infer<typeof emailRoutingSchema>;
 
 export const emailTemplateUpdateSchema = emailTemplateSchema.partial().omit({ templateKey: true });
 export type EmailTemplateUpdateInput = z.infer<typeof emailTemplateUpdateSchema>;

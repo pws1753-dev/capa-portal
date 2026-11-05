@@ -1,5 +1,6 @@
 import { Types } from "mongoose";
 import type { ApiUser } from "@shared/types/api";
+import { startOfTodayIST } from "../domain/due-day";
 import { WORKFLOW_STAGES, WORKFLOW_STAGE_LABELS, type ComplaintType, type WorkflowStage } from "@shared/constants/domain";
 import { hasPermission, canSeeCompany } from "../domain/rbac";
 import { buildTatPlan } from "../domain/tat";
@@ -238,7 +239,7 @@ export async function dashboardAnalytics(user: ApiUser | undefined, companyId?: 
     .lean();
   const capaClosed = capaRows.filter((capa) => capa.status === "Closed" || capa.status === "Completed").length;
   const capaOverdue = capaRows.filter(
-    (capa) => capa.status !== "Closed" && capa.status !== "Completed" && capa.dueDate && new Date(capa.dueDate) < now
+    (capa) => capa.status !== "Closed" && capa.status !== "Completed" && capa.dueDate && new Date(capa.dueDate) < startOfTodayIST(now)
   ).length;
   const effectivenessFailures = capaRows.filter((capa) => capa.effectiveness === "Not Effective").length;
 
@@ -414,12 +415,13 @@ export async function capaAnalytics(user: ApiUser | undefined, companyId?: strin
   const now = new Date();
   const dateFilter = rangeFilter(range);
   const capas = await Capa.find({ ...scope.filter, ...(Object.keys(dateFilter).length ? { createdAt: dateFilter } : {}) })
-    .select("number status dueDate completedAt effectiveness owner type evidenceReview createdAt")
+    .select("number status dueDate completedAt effectiveness owner ownerEmployee type evidenceReview createdAt")
     .populate("owner", "name")
+    .populate("ownerEmployee", "name")
     .lean();
 
   const closed = capas.filter((capa) => capa.status === "Closed" || capa.status === "Completed");
-  const overdue = capas.filter((capa) => capa.status !== "Closed" && capa.status !== "Completed" && capa.dueDate && new Date(capa.dueDate) < now);
+  const overdue = capas.filter((capa) => capa.status !== "Closed" && capa.status !== "Completed" && capa.dueDate && new Date(capa.dueDate) < startOfTodayIST(now));
 
   const ownerMap = new Map<
     string,
@@ -427,13 +429,14 @@ export async function capaAnalytics(user: ApiUser | undefined, companyId?: strin
   >();
   capas.forEach((capa) => {
     const owner = capa.owner as unknown as { _id?: Types.ObjectId; name?: string } | null;
-    const key = owner?.name || "Unassigned";
+    const ownerEmployee = capa.ownerEmployee as unknown as { name?: string } | null;
+    const key = ownerEmployee?.name || owner?.name || "Unassigned";
     const entry = ownerMap.get(key) ?? { owner: key, assigned: 0, open: 0, closed: 0, overdue: 0, effective: 0, notEffective: 0 };
     entry.assigned += 1;
     const isClosed = capa.status === "Closed" || capa.status === "Completed";
     if (isClosed) entry.closed += 1;
     else entry.open += 1;
-    if (!isClosed && capa.dueDate && new Date(capa.dueDate) < now) entry.overdue += 1;
+    if (!isClosed && capa.dueDate && new Date(capa.dueDate) < startOfTodayIST(now)) entry.overdue += 1;
     if (capa.effectiveness === "Effective") entry.effective += 1;
     if (capa.effectiveness === "Not Effective") entry.notEffective += 1;
     ownerMap.set(key, entry);

@@ -328,6 +328,7 @@ export function EightDTab({
         description={`Target dates default to ${targetDates.d3} from the configured containment window and the complaint priority.`}
       >
         <ActionRowsEditor
+          company={complaint.company}
           rows={draft.d3Actions}
           onChange={(rows) => setDraft({ ...draft, d3Actions: rows })}
           readOnly={readOnly}
@@ -437,6 +438,7 @@ export function EightDTab({
           <div>
             <p className="mb-2 text-sm font-bold text-brand-charcoal">Occurrence corrective actions</p>
             <ActionRowsEditor
+          company={complaint.company}
               rows={draft.d5Occurrence}
               onChange={(rows) => setDraft({ ...draft, d5Occurrence: rows })}
               readOnly={readOnly}
@@ -447,6 +449,7 @@ export function EightDTab({
           <div>
             <p className="mb-2 text-sm font-bold text-brand-charcoal">Escape corrective actions</p>
             <ActionRowsEditor
+          company={complaint.company}
               rows={draft.d5Escape}
               onChange={(rows) => setDraft({ ...draft, d5Escape: rows })}
               readOnly={readOnly}
@@ -456,6 +459,7 @@ export function EightDTab({
           <div>
             <p className="mb-2 text-sm font-bold text-brand-charcoal">Systemic corrective actions</p>
             <ActionRowsEditor
+          company={complaint.company}
               rows={draft.d5Systemic}
               onChange={(rows) => setDraft({ ...draft, d5Systemic: rows })}
               readOnly={readOnly}
@@ -473,6 +477,7 @@ export function EightDTab({
           <div>
             <p className="mb-2 text-sm font-bold text-brand-charcoal">Verification actions</p>
             <ActionRowsEditor
+          company={complaint.company}
               rows={draft.d6Verify}
               onChange={(rows) => setDraft({ ...draft, d6Verify: rows })}
               readOnly={readOnly}
