@@ -134,8 +134,8 @@ export async function queryEmailLogs(query: EmailLogQueryInput) {
   const [total, items] = await Promise.all([
     EmailLog.countDocuments(filter),
     EmailLog.find(filter)
-      .populate("relatedComplaintId", "complaintNumber title")
-      .populate("relatedCapaId", "capaNumber title")
+      .populate("relatedComplaintId", "number description")
+      .populate("relatedCapaId", "number action")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(pageSize)
@@ -157,8 +157,8 @@ export async function getEmailLogById(id: string) {
   if (!Types.ObjectId.isValid(id)) throw httpError(400, "Invalid log ID");
   await connectDB();
   const log = await EmailLog.findById(id)
-    .populate("relatedComplaintId", "complaintNumber title status priority")
-    .populate("relatedCapaId", "capaNumber title status")
+    .populate("relatedComplaintId", "number description status priority")
+    .populate("relatedCapaId", "number action status")
     .lean();
   if (!log) throw httpError(404, "Email log record not found");
   return log;

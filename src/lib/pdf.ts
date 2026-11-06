@@ -29,6 +29,7 @@ export type PdfComplaint = {
   company?: { name?: string; code?: string; documentNumber?: string; revision?: string; effectiveDate?: string } | null;
   priority?: { name?: string } | null;
   owner?: { name?: string } | null;
+  ownerEmployee?: { name?: string } | null;
   responsibleDept?: { name?: string } | null;
   internalDept?: { name?: string } | null;
   againstDept?: { name?: string } | null;
@@ -253,7 +254,7 @@ export function generateComplaintPdf(complaint: PdfComplaint, capas: PdfCapa[]) 
       ["Received", formatDateTime(complaint.receivedAt)],
       ["Priority", complaint.priority?.name ?? "—"],
       ["Company", complaint.company?.name ?? "—"],
-      ["Owner", complaint.owner?.name ?? "—"],
+      ["Owner", complaint.ownerEmployee?.name ?? complaint.owner?.name ?? "—"],
       [
         complaint.type === "External" ? "Responsible department" : "Against department",
         (complaint.type === "External" ? complaint.responsibleDept?.name : complaint.againstDept?.name) ?? "—"

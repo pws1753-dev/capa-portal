@@ -58,6 +58,7 @@ async function complaintQuery(context: ReportContext, extra: Record<string, unkn
     .populate("company", "name code")
     .populate("priority", "name")
     .populate("owner", "name")
+    .populate("ownerEmployee", "name")
     .populate("responsibleDept", "name")
     .populate("internalDept", "name")
     .populate("againstDept", "name")
@@ -96,7 +97,7 @@ function complaintBaseRow(complaint: Record<string, unknown>): ReportRow {
     Project: String(complaint.project ?? ""),
     "Customer PO": String(complaint.customerPO ?? ""),
     Department: name(complaint.responsibleDept),
-    Owner: name(complaint.owner),
+    Owner: name(complaint.ownerEmployee) || name(complaint.owner),
     Status: String(complaint.status ?? ""),
     Repeat: complaint.isRepeat ? "Yes" : "No"
   };
@@ -459,6 +460,7 @@ export async function eightDReportData(complaintId: string, user: ApiUser | unde
     .populate("company", "name code documentNumber revision effectiveDate logo")
     .populate("priority", "name")
     .populate("owner", "name email")
+    .populate("ownerEmployee", "name")
     .populate("responsibleDept", "name")
     .populate("internalDept", "name")
     .populate("againstDept", "name")
@@ -481,7 +483,7 @@ export function eightDExcelSheets(data: Awaited<ReturnType<typeof eightDReportDa
     { Field: "Customer", Value: String(complaint.customer ?? "") },
     { Field: "Product", Value: String(complaint.product ?? "") },
     { Field: "Category", Value: String(complaint.category ?? "") },
-    { Field: "Owner", Value: name(complaint.owner) },
+    { Field: "Owner", Value: name(complaint.ownerEmployee) || name(complaint.owner) },
     { Field: "Department", Value: name(complaint.responsibleDept) },
     { Field: "Status", Value: String(complaint.status ?? "") },
     { Field: "Description", Value: String(complaint.description ?? "") },
