@@ -21,3 +21,5 @@ export function startOfTodayIST(now: Date = new Date()): Date {
 export function isPastDueDay(due: Date | string, now: Date = new Date()): boolean {
   return now.getTime() > endOfDueDay(due).getTime();
 }
+
+// Deployed from the capa-portal repository.
