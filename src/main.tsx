@@ -11,7 +11,10 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       retry: 1,
-      refetchOnWindowFocus: false
+      refetchOnWindowFocus: false,
+      // Data seen a moment ago is reused when moving between pages instead of being fetched again.
+      // Saving something refreshes the lists it affects, so this does not show stale results.
+      staleTime: 30_000
     }
   }
 });

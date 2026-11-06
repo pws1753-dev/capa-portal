@@ -147,8 +147,13 @@ export async function deleteAttachment(attachmentId: string, user: ApiUser | und
   const attachment = await Attachment.findById(attachmentId);
   if (!attachment) throw httpError(404, "Attachment not found");
 
-  const { cloudinary: client } = configuredCloudinary();
-  await client.uploader.destroy(attachment.publicId, { resource_type: attachment.resourceType }).catch(() => undefined);
+  // The record is always removed; a Cloudinary problem must not leave a file that can never be deleted.
+  try {
+    const { cloudinary: client } = configuredCloudinary();
+    await client.uploader.destroy(attachment.publicId, { resource_type: attachment.resourceType }).catch(() => undefined);
+  } catch {
+    // Cloudinary is not configured here: only the database record is removed.
+  }
   await Attachment.deleteOne({ _id: attachment._id });
 
   await writeAudit({

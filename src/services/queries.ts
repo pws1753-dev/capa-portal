@@ -572,7 +572,9 @@ export function useApiMutation<TResult, TInput = MutationInput>(
     mutationFn: (input) =>
       api<TResult>(typeof path === "function" ? path(input) : path, {
         method,
-        body: input === undefined ? undefined : JSON.stringify(input)
+        // Only objects are sent as a JSON body. A bare id (e.g. a delete by id) is already in the URL, and a
+        // quoted string is not valid JSON for the server.
+        body: input !== null && typeof input === "object" ? JSON.stringify(input) : undefined
       }),
     onSuccess: () => {
       invalidate.forEach((key) => queryClient.invalidateQueries({ queryKey: key }));

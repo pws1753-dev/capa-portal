@@ -57,8 +57,8 @@ export async function requireActor(user: ApiUser | undefined): Promise<DomainAct
 
 export async function loadComplaintContext(complaintId: string, user: ApiUser | undefined): Promise<ComplaintContext> {
   if (!Types.ObjectId.isValid(complaintId)) throw httpError(400, "Invalid complaint id");
-  const actor = await requireActor(user);
-  const doc = await Complaint.findById(complaintId);
+  // The user's profile and the complaint are independent reads, so they run together.
+  const [actor, doc] = await Promise.all([requireActor(user), Complaint.findById(complaintId)]);
   if (!doc) throw httpError(404, "Complaint not found");
   const domain = toDomainComplaint(doc, await priorityMultiplier(doc.priority));
   if (!canViewComplaint(actor, domain)) throw httpError(403, "You do not have access to this complaint");
@@ -441,19 +441,20 @@ export async function listComplaints(query: ComplaintListQuery, user: ApiUser | 
 
 export async function getComplaintDetail(complaintId: string, user: ApiUser | undefined) {
   const context = await loadComplaintContext(complaintId, user);
-  const tatConfig = await resolveTatConfig(context.doc.company);
-  const capas = await Capa.find({ complaint: context.doc._id }).populate("owner", "name").populate("ownerEmployee", "name").sort({ sequence: 1 }).lean();
   const { priority, internalDept, againstDept, responsibleDept } = context.doc;
-  const [ownerUser, ownerEmployee, priorityDoc, departments] = await Promise.all([
+  const closedAt = context.doc.closedAt;
+  // Everything the page needs is read in one round trip instead of one after another.
+  const [tatConfig, capas, ownerUser, ownerEmployee, priorityDoc, departments, checksDone] = await Promise.all([
+    resolveTatConfig(context.doc.company),
+    Capa.find({ complaint: context.doc._id }).populate("owner", "name").populate("ownerEmployee", "name").sort({ sequence: 1 }).lean(),
     context.doc.owner ? User.findById(context.doc.owner).select("name").lean() : null,
     context.doc.ownerEmployee ? Employee.findById(context.doc.ownerEmployee).select("name").lean() : null,
     priority ? Priority.findById(priority).select("name").lean() : null,
-    Department.find({ _id: { $in: [internalDept, againstDept, responsibleDept].filter(Boolean) } }).select("name").lean()
+    Department.find({ _id: { $in: [internalDept, againstDept, responsibleDept].filter(Boolean) } }).select("name").lean(),
+    // A closed complaint is re-checked every six months; the next check follows the ones already recorded.
+    closedAt ? EffectivenessCheck.countDocuments({ complaint: context.doc._id, closedAt }) : 0
   ]);
   const departmentName = (id: unknown) => (id ? departments.find((entry) => String(entry._id) === String(id))?.name : undefined);
-  // A closed complaint is re-checked every six months; the next check follows the ones already recorded.
-  const closedAt = context.doc.closedAt;
-  const checksDone = closedAt ? await EffectivenessCheck.countDocuments({ complaint: context.doc._id, closedAt }) : 0;
   return {
     complaint: {
       ...context.doc.toObject(),
