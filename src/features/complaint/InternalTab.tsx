@@ -9,8 +9,11 @@ import { ApiError } from "@/lib/api";
 import { useApiMutation, useConfiguration, type ActionRow, type ComplaintDetail } from "@/services/queries";
 import { ActionRowsEditor, BlockedReasons, TabPanel, WhyChainEditor } from "./shared";
 import { SignatureBlock } from "./SignatureBlock";
+import { RelatedEmailsField } from "./RelatedEmailsField";
+import { parseRelatedEmails } from "@/lib/related-emails";
 
 type Draft = {
+  relatedEmailsText: string;
   d0: string;
   d3Actions: ActionRow[];
   problem: string;
@@ -26,6 +29,7 @@ type Draft = {
 
 function toDraft(complaint: ComplaintDetail): Draft {
   return {
+    relatedEmailsText: (complaint.relatedEmails ?? []).join(", "),
     d0: complaint.d0 ?? "",
     d3Actions: complaint.d3Actions ?? [],
     problem: complaint.d2?.what ?? "",
@@ -61,6 +65,7 @@ export function InternalTab({ complaint, canEdit }: { complaint: ComplaintDetail
     setIssues([]);
     try {
       await save.mutateAsync({
+        relatedEmails: parseRelatedEmails(draft.relatedEmailsText),
         d0: draft.d0,
         d3Actions: draft.d3Actions,
         d2: { what: draft.problem },
@@ -90,6 +95,14 @@ export function InternalTab({ complaint, canEdit }: { complaint: ComplaintDetail
       ) : null}
 
       <BlockedReasons title="The server rejected this save" issues={issues} />
+
+      <SectionCard title="Complaint email recipients" description="Keep non-account holders informed throughout this complaint and all related CAPAs.">
+        <RelatedEmailsField
+          value={draft.relatedEmailsText}
+          disabled={readOnly}
+          onChange={(relatedEmailsText) => setDraft({ ...draft, relatedEmailsText })}
+        />
+      </SectionCard>
 
       <SectionCard
         title="Immediate response and containment"

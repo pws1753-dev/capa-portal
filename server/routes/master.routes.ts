@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { z } from "zod";
 import { DEFAULT_ROLE_PERMISSIONS, PERMISSIONS } from "@shared/constants/permissions";
 import {
   companyCreateSchema,
@@ -28,14 +29,23 @@ masterRouter.use(requireUser);
 masterRouter.get(
   "/bootstrap",
   requirePermission("view.company"),
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
     await connectDB();
+    const options = z.object({ include: z.enum(["reference", "employees", "full"]).default("reference") }).parse(req.query);
+    const includeEmployees = options.include === "employees" || options.include === "full";
+    const includeAdminData = options.include === "full";
     const [companies, departments, roles, permissions, employees] = await Promise.all([
-      Company.find().sort({ name: 1 }).lean(),
-      Department.find().sort({ name: 1 }).lean(),
-      Role.find().sort({ name: 1 }).lean(),
-      Permission.find().sort({ key: 1 }).lean(),
-      Employee.find().sort({ name: 1 }).limit(500).lean()
+      Company.find().select("name code complaintNumberingPrefix active").sort({ name: 1 }).lean(),
+      Department.find().select("name code company managementEmails active").sort({ name: 1 }).lean(),
+      includeAdminData ? Role.find().sort({ name: 1 }).lean() : Promise.resolve([]),
+      includeAdminData ? Permission.find().sort({ key: 1 }).lean() : Promise.resolve([]),
+      includeEmployees
+        ? Employee.find()
+            .select("name employeeCode designation email department company managerName managerEmail hodName hodEmail linkedUser active")
+            .sort({ name: 1 })
+            .limit(500)
+            .lean()
+        : Promise.resolve([])
     ]);
     return ok(res, { companies, departments, roles, permissions, employees });
   })

@@ -32,16 +32,16 @@ configurationRouter.get(
   asyncHandler(async (req, res) => {
     await connectDB();
     const company = typeof req.query.company === "string" && req.query.company ? req.query.company : null;
+    const basic = req.query.view === "basic";
     const [tat, escalation, delayReasonItems, categories, priorities, rootCauseCategories, numbering] = await Promise.all([
-      resolveTatConfig(company),
-      resolveEscalation(company),
-      DelayReason.find({ active: true }).sort({ order: 1, name: 1 }).lean(),
+      basic ? Promise.resolve({}) : resolveTatConfig(company),
+      basic ? Promise.resolve({ levels: [], reminderPercentages: [] }) : resolveEscalation(company),
+      basic ? Promise.resolve([]) : DelayReason.find({ active: true }).sort({ order: 1, name: 1 }).lean(),
       Category.find({ active: true }).sort({ complaintType: 1, order: 1, name: 1 }).lean(),
       Priority.find({ active: true }).sort({ order: 1 }).lean(),
-      RootCauseCategory.find({ active: true }).sort({ order: 1, name: 1 }).lean(),
-      company ? NumberingConfiguration.findOne({ company, active: true }).lean() : Promise.resolve(null)
+      basic ? Promise.resolve([]) : RootCauseCategory.find({ active: true }).sort({ order: 1, name: 1 }).lean(),
+      !basic && company ? NumberingConfiguration.findOne({ company, active: true }).lean() : Promise.resolve(null)
     ]);
-
     return ok(res, {
       tat,
       escalation,

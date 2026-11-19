@@ -264,7 +264,7 @@ function SimpleListRow({
 export function MasterDataPage() {
   const toast = useToast();
   const permissions = usePermissions();
-  const master = useMasterBootstrap();
+  const master = useMasterBootstrap("full");
   const usersQuery = useSystemUsers(permissions.isMasterAdmin);
   const [activeTab, setActiveTab] = useState<MasterTab>("companies");
   const [selectedCompany, setSelectedCompany] = useState("");
@@ -319,8 +319,8 @@ export function MasterDataPage() {
   const [resetRolesOpen, setResetRolesOpen] = useState(false);
   const [grantAllTo, setGrantAllTo] = useState<{ id: string; name: string; permissions: string[] } | null>(null);
 
-  const companies = master.data?.companies ?? [];
-  const departments = master.data?.departments ?? [];
+  const companies = useMemo(() => master.data?.companies ?? [], [master.data?.companies]);
+  const departments = useMemo(() => master.data?.departments ?? [], [master.data?.departments]);
 
   // The server sorts roles alphabetically, which puts Auditor above Master Admin. The
   // matrix reads as a privilege ladder, so it follows the declared role order instead.
@@ -331,8 +331,8 @@ export function MasterDataPage() {
     };
     return [...(master.data?.roles ?? [])].sort((left, right) => rank(left.name) - rank(right.name) || left.name.localeCompare(right.name));
   }, [master.data?.roles]);
-  const employees = master.data?.employees ?? [];
-  const permissionsList = master.data?.permissions ?? [];
+  const employees = useMemo(() => master.data?.employees ?? [], [master.data?.employees]);
+  const permissionsList = useMemo(() => master.data?.permissions ?? [], [master.data?.permissions]);
   const systemUsers = usersQuery.data?.users ?? [];
 
   useEffect(() => {

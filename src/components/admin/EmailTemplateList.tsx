@@ -77,7 +77,7 @@ export function EmailTemplateList() {
     }
   });
 
-  const templates = templatesQuery.data || [];
+  const templates = useMemo(() => templatesQuery.data || [], [templatesQuery.data]);
 
   const filteredTemplates = useMemo(() => {
     return templates.filter((t: TemplateData) => {

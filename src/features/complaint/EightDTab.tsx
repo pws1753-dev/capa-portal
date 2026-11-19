@@ -19,8 +19,11 @@ import {
 } from "@/services/queries";
 import { ActionRowsEditor, BlockedReasons, FishbonePanels, TabPanel, WhyChainEditor } from "./shared";
 import { SignatureBlock } from "./SignatureBlock";
+import { RelatedEmailsField } from "./RelatedEmailsField";
+import { parseRelatedEmails } from "@/lib/related-emails";
 
 type Draft = {
+  relatedEmailsText: string;
   d0: string;
   d1Team: NonNullable<ComplaintDetail["d1Team"]>;
   d2: Record<string, string>;
@@ -54,6 +57,7 @@ type Draft = {
 
 function toDraft(complaint: ComplaintDetail): Draft {
   return {
+    relatedEmailsText: (complaint.relatedEmails ?? []).join(", "),
     d0: complaint.d0 ?? "",
     d1Team: complaint.d1Team ?? [],
     d2: { what: "", where: "", when: "", who: "", involved: "", howMany: "", how: "", ...(complaint.d2 ?? {}) },
@@ -122,7 +126,7 @@ export function EightDTab({
 }) {
   const toast = useToast();
   const configuration = useConfiguration(complaint.company);
-  const master = useMasterBootstrap();
+  const master = useMasterBootstrap("employees");
   const attachments = useAttachments("Complaint", complaint._id);
   const [draft, setDraft] = useState<Draft>(() => toDraft(complaint));
   const [issues, setIssues] = useState<{ field: string; message: string; section?: string }[]>([]);
@@ -131,7 +135,7 @@ export function EightDTab({
     setDraft(toDraft(complaint));
   }, [complaint]);
 
-  const save = useApiMutation<{ complaint: ComplaintDetail }, Partial<Draft>>("PATCH", `/api/complaints/${complaint._id}/8d`, [
+  const save = useApiMutation<{ complaint: ComplaintDetail }, Record<string, unknown>>("PATCH", `/api/complaints/${complaint._id}/8d`, [
     ["complaint", complaint._id]
   ]);
 
@@ -153,8 +157,10 @@ export function EightDTab({
   async function onSave() {
     setIssues([]);
     try {
+      const { relatedEmailsText, ...investigation } = draft;
       await save.mutateAsync({
-        ...draft,
+        ...investigation,
+        relatedEmails: parseRelatedEmails(relatedEmailsText),
         d7LongTermResult: draft.d7LongTermResult === "" ? "" : draft.d7LongTermResult
       });
       toast.success("8D report saved", "Every change is recorded in the audit trail.");
@@ -173,6 +179,14 @@ export function EightDTab({
       ) : null}
 
       <BlockedReasons title="The server rejected this save" issues={issues} />
+
+      <SectionCard title="Complaint email recipients" description="Keep non-account holders informed throughout this complaint and all related CAPAs.">
+        <RelatedEmailsField
+          value={draft.relatedEmailsText}
+          disabled={readOnly}
+          onChange={(relatedEmailsText) => setDraft({ ...draft, relatedEmailsText })}
+        />
+      </SectionCard>
 
       <SectionCard title={<DBanner code="D0" />}>
         <Field label="Emergency response taken to contain the immediate risk">

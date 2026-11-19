@@ -14,6 +14,8 @@ import { useToast } from "@/components/ui/toast-context";
 import { api } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 import { useApiMutation, useAssignableUsers, useConfiguration, useMasterBootstrap, usePermissions } from "@/services/queries";
+import { RelatedEmailsField } from "@/features/complaint/RelatedEmailsField";
+import { hasOnlyValidRelatedEmails, parseRelatedEmails } from "@/lib/related-emails";
 
 const formSchema = z.object({
   type: z.enum(COMPLAINT_TYPES),
@@ -35,7 +37,11 @@ const formSchema = z.object({
   category: z.string().min(1, "Select a category"),
   subCategory: z.string().max(120).optional(),
   description: z.string().min(10, "Describe the complaint in at least 10 characters"),
-  owner: z.string().optional()
+  owner: z.string().optional(),
+  relatedEmails: z
+    .string()
+    .max(4000)
+    .refine(hasOnlyValidRelatedEmails, "Enter valid email addresses separated by commas or new lines")
 });
 
 type FormValues = z.infer<typeof formSchema>;
@@ -47,7 +53,7 @@ export function NewComplaintPage() {
   const toast = useToast();
   const permissions = usePermissions();
   const master = useMasterBootstrap();
-  const configuration = useConfiguration();
+  const configuration = useConfiguration(undefined, "basic");
   const [duplicates, setDuplicates] = useState<DuplicateHit[]>([]);
   const [checkingDuplicates, setCheckingDuplicates] = useState(false);
 
@@ -64,7 +70,8 @@ export function NewComplaintPage() {
       receivedAt: new Date().toISOString().slice(0, 16),
       priority: "",
       category: "",
-      description: ""
+      description: "",
+      relatedEmails: ""
     }
   });
 
@@ -89,7 +96,9 @@ export function NewComplaintPage() {
 
   // Repeat pre-check uses the same server rules the create endpoint applies.
   useEffect(() => {
-    if (!company || !category || (!customer && !product)) {
+    const repeatTerm = (customer || product || "").trim();
+    // Avoid an expensive server search for one- or two-character partial input while the user is typing.
+    if (!company || !category || repeatTerm.length < 3) {
       setDuplicates([]);
       return;
     }
@@ -97,8 +106,7 @@ export function NewComplaintPage() {
       setCheckingDuplicates(true);
       try {
         const search = new URLSearchParams({ company, category, pageSize: "5" });
-        if (customer) search.set("search", customer);
-        else if (product) search.set("search", product);
+        search.set("search", repeatTerm);
         const result = await api<{ items: DuplicateHit[] }>(`/api/complaints?${search.toString()}`);
         setDuplicates(result.items ?? []);
       } catch {
@@ -110,7 +118,7 @@ export function NewComplaintPage() {
     return () => window.clearTimeout(timer);
   }, [company, category, customer, product]);
 
-  const createComplaint = useApiMutation<{ complaint: { _id: string; number: string } }, FormValues>("POST", "/api/complaints", [["complaints"]]);
+  const createComplaint = useApiMutation<{ complaint: { _id: string; number: string } }, Record<string, unknown>>("POST", "/api/complaints", [["complaints"]]);
 
   const categories = (configuration.data?.categories ?? []).filter((entry) => entry.complaintType === type);
   const departments = master.data?.departments ?? [];
@@ -126,9 +134,10 @@ export function NewComplaintPage() {
         againstDept: type === "Internal" ? values.againstDept : undefined,
         // Employees without a portal login are prefixed "emp:" in the picker.
         owner: values.owner && !values.owner.startsWith("emp:") ? values.owner : undefined,
-        ownerEmployee: values.owner?.startsWith("emp:") ? values.owner.slice(4) : undefined
+        ownerEmployee: values.owner?.startsWith("emp:") ? values.owner.slice(4) : undefined,
+        relatedEmails: parseRelatedEmails(values.relatedEmails)
       };
-      const result = await createComplaint.mutateAsync(payload as FormValues);
+      const result = await createComplaint.mutateAsync(payload);
       toast.success("Complaint registered", `${result.complaint.number} was created.`);
       navigate(`/complaints/${result.complaint._id}`);
     } catch (error) {
@@ -315,6 +324,15 @@ export function NewComplaintPage() {
                       ) : null}
                     </Select>
                   </Field>
+                )}
+              />
+            </div>
+            <div className="lg:col-span-3">
+              <Controller
+                control={form.control}
+                name="relatedEmails"
+                render={({ field, fieldState }) => (
+                  <RelatedEmailsField value={field.value} onChange={field.onChange} error={fieldState.error?.message} />
                 )}
               />
             </div>

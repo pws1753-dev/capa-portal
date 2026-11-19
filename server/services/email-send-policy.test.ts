@@ -6,6 +6,7 @@ const writeEmailLog = vi.fn(async (entry: Record<string, unknown>) => ({ _id: "l
 const resolveDepartmentCc = vi.fn(async (_ref: { excludeManagement?: boolean }) => [] as string[]);
 const resolveRecipientChainCc = vi.fn(async () => [] as string[]);
 const getThreadHistory = vi.fn(async (_key: string) => [] as Record<string, unknown>[]);
+let relatedEmails: string[] = [];
 
 let routing = { commonCc: ["service@onepws.com", "jatin.chouhan@onepws.com", "process@onepws.com"], excludeEmails: [] as string[], defaultCommonCc: [] as string[] };
 vi.mock("./email-routing.service", async () => {
@@ -37,6 +38,9 @@ vi.mock("./email-log.service", () => ({
   getThreadHistory
 }));
 vi.mock("../models/Capa", () => ({ Capa: { findById: () => ({ select: () => ({ lean: async () => null }) }) } }));
+vi.mock("../models/Complaint", () => ({
+  Complaint: { findById: () => ({ select: () => ({ lean: async () => ({ relatedEmails }) }) }) }
+}));
 vi.mock("./email-recipient.service", () => ({ resolveDepartmentCc, resolveRecipientChainCc }));
 vi.mock("../models/EmailLog", () => ({ EmailLog: { findByIdAndUpdate: async () => null } }));
 
@@ -54,6 +58,7 @@ beforeEach(() => {
   getThreadHistory.mockResolvedValue([]);
   resolveDepartmentCc.mockResolvedValue([]);
   resolveRecipientChainCc.mockResolvedValue([]);
+  relatedEmails = [];
 });
 
 describe("portal emails never leave the company", () => {
@@ -61,6 +66,13 @@ describe("portal emails never leave the company", () => {
     const result = await sendTemplatedEmail({ ...base, recipients: ["owner@onepws.com"], cc: ["boss@onepws.com"] });
     expect(result.status).toBe("sent");
     expect(sendMail).toHaveBeenCalledWith(expect.objectContaining({ to: ["owner@onepws.com"], cc: ["boss@onepws.com", ...COMMON] }));
+  });
+
+  it("copies complaint-related addresses without requiring portal accounts", async () => {
+    relatedEmails = ["observer@onepws.com", "supplier@gmail.com"];
+    await sendTemplatedEmail({ ...base, recipients: ["owner@onepws.com"] });
+    expect(sendMail.mock.calls[0][0].cc).toEqual(["observer@onepws.com", ...COMMON]);
+    expect(writeEmailLog).toHaveBeenCalledWith(expect.objectContaining({ status: "skipped", recipients: ["supplier@gmail.com"] }));
   });
 
   it("drops a customer address from To, CC and BCC and still sends to the company people", async () => {

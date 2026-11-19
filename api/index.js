@@ -1,5 +1,5 @@
 // server/app.ts
-import { randomUUID } from "node:crypto";
+import { randomUUID as randomUUID2 } from "node:crypto";
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import express from "express";
@@ -512,7 +512,7 @@ var AUDIT_ACTIONS = [
   "EXPORT"
 ];
 var NOTIFICATION_CATEGORIES = ["complaint", "capa", "workflow", "evidence", "effectiveness", "system"];
-var ATTACHMENT_PURPOSES = ["complaint.attachment", "capa.evidence", "capa.effectiveness", "d6.document", "company.logo"];
+var ATTACHMENT_PURPOSES = ["complaint.attachment", "complaint.photo", "capa.evidence", "capa.effectiveness", "d6.document", "company.logo"];
 var ALLOWED_UPLOAD_MIME_TYPES = [
   "image/png",
   "image/jpeg",
@@ -578,7 +578,6 @@ var EMAIL_TRIGGER_EVENTS = [
   "DAILY_SUMMARY",
   "WEEKLY_SUMMARY"
 ];
-var MANAGEMENT_ESCALATION_DAYS = 10;
 var EFFECTIVENESS_REVIEW_MONTHS = 6;
 
 // shared/schemas/common.ts
@@ -602,7 +601,23 @@ function paginate(items, total, query) {
 }
 
 // server/services/analytics.service.ts
-import { Types as Types5 } from "mongoose";
+import { Types as Types6 } from "mongoose";
+
+// server/domain/due-day.ts
+var IST_OFFSET_MS = 5.5 * 36e5;
+var DAY_MS = 864e5;
+function endOfDueDay(due) {
+  const istMs = new Date(due).getTime() + IST_OFFSET_MS;
+  const dayStart = Math.floor(istMs / DAY_MS) * DAY_MS;
+  return new Date(dayStart + DAY_MS - 1 - IST_OFFSET_MS);
+}
+function startOfTodayIST(now = /* @__PURE__ */ new Date()) {
+  const istMs = now.getTime() + IST_OFFSET_MS;
+  return new Date(Math.floor(istMs / DAY_MS) * DAY_MS - IST_OFFSET_MS);
+}
+function isPastDueDay(due, now = /* @__PURE__ */ new Date()) {
+  return now.getTime() > endOfDueDay(due).getTime();
+}
 
 // server/domain/rbac.ts
 function hasPermission(actor, permission) {
@@ -663,12 +678,12 @@ function canCloseComplaint(actor, complaint) {
 
 // server/domain/tat.ts
 var HOUR_MS = 36e5;
-var DAY_MS = 864e5;
+var DAY_MS2 = 864e5;
 function addHours(base, hours) {
   return new Date(new Date(base).getTime() + hours * HOUR_MS);
 }
 function addDays(base, days) {
-  return new Date(new Date(base).getTime() + days * DAY_MS);
+  return new Date(new Date(base).getTime() + days * DAY_MS2);
 }
 function computeStageDueDates(complaint, config) {
   const multiplier = complaint.priorityMultiplier > 0 ? complaint.priorityMultiplier : 1;
@@ -681,7 +696,7 @@ function computeStageDueDates(complaint, config) {
   };
 }
 function stageHealth(dueAt, completedAt, now, dueSoonHours) {
-  const due = new Date(dueAt);
+  const due = endOfDueDay(dueAt);
   if (completedAt) return new Date(completedAt) <= due ? "on-time" : "overdue";
   if (now > due) return "overdue";
   const hoursRemaining = (due.getTime() - now.getTime()) / HOUR_MS;
@@ -717,7 +732,7 @@ function buildTatPlan(complaint, config, now = /* @__PURE__ */ new Date()) {
   });
 }
 function isStageOverdueNow(complaint, stage, config, now = /* @__PURE__ */ new Date()) {
-  return now > computeStageDueDates(complaint, config)[stage];
+  return isPastDueDay(computeStageDueDates(complaint, config)[stage], now);
 }
 
 // server/models/Capa.ts
@@ -760,6 +775,8 @@ var CapaSchema = new Schema4(
     type: { type: String, enum: CAPA_TYPES, default: "Corrective" },
     action: { type: String, required: true, trim: true },
     owner: { type: Schema4.Types.ObjectId, ref: "User", index: true },
+    /** A Master Data employee without a portal login named as the action owner (the accountable portal user stays in `owner`). */
+    ownerEmployee: { type: Schema4.Types.ObjectId, ref: "Employee", index: true },
     department: { type: Schema4.Types.ObjectId, ref: "Department", index: true },
     priority: { type: Schema4.Types.ObjectId, ref: "Priority" },
     assignedAt: { type: Date, default: Date.now },
@@ -896,6 +913,8 @@ var ComplaintSchema = new Schema5(
     owner: { type: Schema5.Types.ObjectId, ref: "User", index: true },
     /** Directory employee named as owner when they have no portal login; `owner` stays the accountable user. */
     ownerEmployee: { type: Schema5.Types.ObjectId, ref: "Employee", index: true },
+    /** Company addresses copied on every automated email concerning this complaint or one of its CAPAs. */
+    relatedEmails: { type: [String], default: [] },
     createdBy: { type: Schema5.Types.ObjectId, ref: "User" },
     acknowledgedAt: { type: Date, default: null },
     ackDelayReason: { type: DelayReasonSchema, default: null },
@@ -1068,7 +1087,11 @@ var EscalationConfigurationSchema = new Schema7(
     company: { type: Schema7.Types.ObjectId, ref: "Company", default: null, unique: true, index: true },
     levels: { type: [EscalationLevelSchema], default: [] },
     reminderPercentages: { type: [Number], default: [...DEFAULT_REMINDER_PERCENTAGES] },
-    active: { type: Boolean, default: true }
+    active: { type: Boolean, default: true },
+    autoEmailEnabled: { type: Boolean, default: true },
+    frequencyDays: { type: Number, default: 7, min: 1, max: 90 },
+    lastReminderRunAt: { type: Date, default: null },
+    lastEscalationRunAt: { type: Date, default: null }
   },
   { timestamps: true }
 );
@@ -1140,7 +1163,12 @@ async function resolveEscalation(companyId) {
   const source = specific ?? global;
   const levels = source?.levels?.length ? source.levels.map((entry) => ({ ...entry })) : DEFAULT_ESCALATION_LEVELS.map((entry) => ({ ...entry }));
   const reminderPercentages = source?.reminderPercentages?.length ? [...source.reminderPercentages] : [...DEFAULT_REMINDER_PERCENTAGES];
-  return { levels, reminderPercentages };
+  return {
+    levels,
+    reminderPercentages,
+    autoEmailEnabled: source?.autoEmailEnabled ?? true,
+    frequencyDays: source?.frequencyDays ?? 7
+  };
 }
 async function activeDelayReasons() {
   const rows = await DelayReason.find({ active: true }).sort({ order: 1, name: 1 }).lean();
@@ -1161,7 +1189,7 @@ async function resolveNumbering(companyId) {
 }
 
 // server/services/complaint.service.ts
-import { Types as Types4 } from "mongoose";
+import { Types as Types5 } from "mongoose";
 
 // server/domain/closure.ts
 function filled(values) {
@@ -1223,7 +1251,7 @@ function shouldAutoReopenOnLongTerm(complaint) {
 }
 
 // server/domain/effectiveness-review.ts
-var DAY_MS2 = 24 * 60 * 60 * 1e3;
+var DAY_MS3 = 24 * 60 * 60 * 1e3;
 var EFFECTIVENESS_REMINDER_MILESTONES = [30, 14, 7, 3, 1, 0];
 var DUE_SOON_DAYS = 30;
 function addMonthsClamped(date2, months) {
@@ -1239,7 +1267,7 @@ function nextReviewDue(closedAt, completedChecks) {
   return addMonthsClamped(new Date(closedAt), EFFECTIVENESS_REVIEW_MONTHS * (completedChecks + 1));
 }
 function daysUntil(due, now) {
-  return Math.ceil((due.getTime() - now.getTime()) / DAY_MS2) + 0;
+  return Math.ceil((due.getTime() - now.getTime()) / DAY_MS3) + 0;
 }
 function reviewStatus(daysLeft) {
   if (daysLeft < 0) return "Overdue";
@@ -1250,42 +1278,6 @@ function effectivenessReminderBucket(daysLeft) {
   const milestone = [...EFFECTIVENESS_REMINDER_MILESTONES].reverse().find((value) => daysLeft <= value);
   return milestone === void 0 ? null : { key: `due-${milestone}`, overdue: false };
 }
-
-// server/lib/email-policy.ts
-var DEFAULT_ALLOWED_DOMAINS = ["onepws.com", "wmspl.co.in", "pwsfloor.com"];
-var COMMON_CC_EMAILS = ["service@onepws.com", "jatin.chouhan@onepws.com", "process@onepws.com"];
-var MANAGEMENT_ONLY_AFTER_DELAY = /* @__PURE__ */ new Set([
-  // reminders before the due date: nothing is late yet
-  "TAT_REMINDER",
-  "TAT_DUE_SOON",
-  "CAPA_DUE_REMINDER",
-  // reminders about something already late
-  "TAT_DELAY_DAILY",
-  "CAPA_OVERDUE",
-  "EFFECTIVENESS_REVIEW_DUE"
-]);
-function excludesManagementByDefault(triggerEvent) {
-  return MANAGEMENT_ONLY_AFTER_DELAY.has(triggerEvent);
-}
-function allowedEmailDomains() {
-  const configured = (process.env.EMAIL_ALLOWED_DOMAINS ?? "").split(/[,;\s]+/).map((domain) => domain.trim().toLowerCase().replace(/^@/, "")).filter(Boolean);
-  return configured.length > 0 ? configured : DEFAULT_ALLOWED_DOMAINS;
-}
-function isInternalAddress(email) {
-  const address = email.trim().toLowerCase();
-  if (!/^[^\s@<>,;"']+@[^\s@<>,;"']+$/.test(address)) return false;
-  return allowedEmailDomains().includes(address.slice(address.lastIndexOf("@") + 1));
-}
-function splitByEmailPolicy(addresses) {
-  const allowed = [];
-  const blocked = [];
-  for (const address of addresses ?? []) {
-    if (!address || !address.trim()) continue;
-    (isInternalAddress(address) ? allowed : blocked).push(address);
-  }
-  return { allowed, blocked };
-}
-var EXTERNAL_ADDRESS_MESSAGE = () => `Only company addresses (${allowedEmailDomains().map((domain) => `@${domain}`).join(", ")}) can receive portal emails`;
 
 // server/domain/repeat.ts
 function matchesRepeatRule(candidate, existing, cutoff) {
@@ -1494,25 +1486,61 @@ var DepartmentSchema = new Schema9(
 DepartmentSchema.index({ name: 1, company: 1 }, { unique: true });
 var Department = mongoose10.models.Department || mongoose10.model("Department", DepartmentSchema);
 
-// server/models/EffectivenessCheck.ts
+// server/models/ComplaintNote.ts
 import mongoose11, { Schema as Schema10 } from "mongoose";
-var EFFECTIVENESS_CHECK_RESULTS = ["Sustained", "Not Sustained"];
-var EffectivenessCheckSchema = new Schema10(
+var ComplaintNoteSchema = new Schema10(
   {
     complaint: { type: Schema10.Types.ObjectId, ref: "Complaint", required: true, index: true },
+    company: { type: Schema10.Types.ObjectId, ref: "Company", required: true, index: true },
+    kind: { type: String, enum: NOTE_KINDS, default: "Note", index: true },
+    referenceDate: { type: Date, default: null },
+    content: { type: String, required: true, trim: true },
+    createdBy: { type: Schema10.Types.ObjectId, ref: "User", index: true },
+    createdByName: { type: String, trim: true }
+  },
+  { timestamps: true }
+);
+ComplaintNoteSchema.index({ complaint: 1, createdAt: -1 });
+var ComplaintNote = mongoose11.models.ComplaintNote || mongoose11.model("ComplaintNote", ComplaintNoteSchema);
+
+// server/models/EffectivenessCheck.ts
+import mongoose12, { Schema as Schema11 } from "mongoose";
+var EFFECTIVENESS_CHECK_RESULTS = ["Sustained", "Not Sustained"];
+var EffectivenessCheckSchema = new Schema11(
+  {
+    complaint: { type: Schema11.Types.ObjectId, ref: "Complaint", required: true, index: true },
     closedAt: { type: Date, required: true },
     cycle: { type: Number, required: true, min: 1 },
     dueAt: { type: Date, required: true },
     result: { type: String, enum: EFFECTIVENESS_CHECK_RESULTS, required: true },
     remarks: { type: String, trim: true, default: "" },
     checkedAt: { type: Date, required: true },
-    checkedBy: { type: Schema10.Types.ObjectId, ref: "User" },
+    checkedBy: { type: Schema11.Types.ObjectId, ref: "User" },
     checkedByName: { type: String, trim: true, default: "" }
   },
   { timestamps: true }
 );
 EffectivenessCheckSchema.index({ complaint: 1, closedAt: 1, cycle: 1 }, { unique: true });
-var EffectivenessCheck = mongoose11.models.EffectivenessCheck || mongoose11.model("EffectivenessCheck", EffectivenessCheckSchema);
+var EffectivenessCheck = mongoose12.models.EffectivenessCheck || mongoose12.model("EffectivenessCheck", EffectivenessCheckSchema);
+
+// server/models/Notification.ts
+import mongoose13, { Schema as Schema12 } from "mongoose";
+var NotificationSchema = new Schema12(
+  {
+    recipient: { type: Schema12.Types.ObjectId, ref: "User", required: true, index: true },
+    message: { type: String, required: true, trim: true },
+    category: { type: String, enum: NOTIFICATION_CATEGORIES, default: "system", index: true },
+    priority: { type: String, enum: ["normal", "high"], default: "normal" },
+    entityType: { type: String, trim: true },
+    entityId: { type: Schema12.Types.ObjectId },
+    link: { type: String, trim: true },
+    read: { type: Boolean, default: false, index: true },
+    readAt: { type: Date, default: null }
+  },
+  { timestamps: true }
+);
+NotificationSchema.index({ recipient: 1, read: 1, createdAt: -1 });
+var Notification = mongoose13.models.Notification || mongoose13.model("Notification", NotificationSchema);
 
 // server/services/mappers.ts
 function id(value) {
@@ -1663,25 +1691,6 @@ function toDomainActor(user, department) {
     department: department ?? user.department
   };
 }
-
-// server/models/Notification.ts
-import mongoose12, { Schema as Schema11 } from "mongoose";
-var NotificationSchema = new Schema11(
-  {
-    recipient: { type: Schema11.Types.ObjectId, ref: "User", required: true, index: true },
-    message: { type: String, required: true, trim: true },
-    category: { type: String, enum: NOTIFICATION_CATEGORIES, default: "system", index: true },
-    priority: { type: String, enum: ["normal", "high"], default: "normal" },
-    entityType: { type: String, trim: true },
-    entityId: { type: Schema11.Types.ObjectId },
-    link: { type: String, trim: true },
-    read: { type: Boolean, default: false, index: true },
-    readAt: { type: Date, default: null }
-  },
-  { timestamps: true }
-);
-NotificationSchema.index({ recipient: 1, read: 1, createdAt: -1 });
-var Notification = mongoose12.models.Notification || mongoose12.model("Notification", NotificationSchema);
 
 // server/services/notification.service.ts
 async function notify(input) {
@@ -1931,6 +1940,42 @@ function getSampleVariables(triggerEvent) {
   }
   return complaintVars;
 }
+
+// server/lib/email-policy.ts
+var DEFAULT_ALLOWED_DOMAINS = ["onepws.com", "wmspl.co.in", "pwsfloor.com"];
+var COMMON_CC_EMAILS = ["service@onepws.com", "jatin.chouhan@onepws.com", "process@onepws.com"];
+var MANAGEMENT_ONLY_AFTER_DELAY = /* @__PURE__ */ new Set([
+  // reminders before the due date: nothing is late yet
+  "TAT_REMINDER",
+  "TAT_DUE_SOON",
+  "CAPA_DUE_REMINDER",
+  // reminders about something already late
+  "TAT_DELAY_DAILY",
+  "CAPA_OVERDUE",
+  "EFFECTIVENESS_REVIEW_DUE"
+]);
+function excludesManagementByDefault(triggerEvent) {
+  return MANAGEMENT_ONLY_AFTER_DELAY.has(triggerEvent);
+}
+function allowedEmailDomains() {
+  const configured = (process.env.EMAIL_ALLOWED_DOMAINS ?? "").split(/[,;\s]+/).map((domain) => domain.trim().toLowerCase().replace(/^@/, "")).filter(Boolean);
+  return configured.length > 0 ? configured : DEFAULT_ALLOWED_DOMAINS;
+}
+function isInternalAddress(email) {
+  const address = email.trim().toLowerCase();
+  if (!/^[^\s@<>,;"']+@[^\s@<>,;"']+$/.test(address)) return false;
+  return allowedEmailDomains().includes(address.slice(address.lastIndexOf("@") + 1));
+}
+function splitByEmailPolicy(addresses) {
+  const allowed = [];
+  const blocked = [];
+  for (const address of addresses ?? []) {
+    if (!address || !address.trim()) continue;
+    (isInternalAddress(address) ? allowed : blocked).push(address);
+  }
+  return { allowed, blocked };
+}
+var EXTERNAL_ADDRESS_MESSAGE = () => `Only company addresses (${allowedEmailDomains().map((domain) => `@${domain}`).join(", ")}) can receive portal emails`;
 
 // server/lib/mailer.ts
 import nodemailer from "nodemailer";
@@ -2238,6 +2283,11 @@ async function resolveRecipients(options) {
     const email = normalizeEmail(capaOwner?.email);
     if (email) recipientSet.add(email);
   }
+  if (roles.includes("CAPA Owner") && capaDoc?.ownerEmployee) {
+    const ownerEmployee = await Employee.findOne({ _id: capaDoc.ownerEmployee, active: { $ne: false } }).select("email").lean();
+    const email = normalizeEmail(ownerEmployee?.email);
+    if (email) recipientSet.add(email);
+  }
   if ((roles.includes("Department Head") || roles.includes("Manager")) && effectiveDepartmentId) {
     const query = {
       department: departmentIds ? { $in: departmentIds } : effectiveDepartmentId,
@@ -2329,8 +2379,8 @@ async function resolveRecipients(options) {
 import { Types as Types2 } from "mongoose";
 
 // server/models/EmailTemplate.ts
-import mongoose13, { Schema as Schema12 } from "mongoose";
-var EmailTemplateSchema = new Schema12(
+import mongoose14, { Schema as Schema13 } from "mongoose";
+var EmailTemplateSchema = new Schema13(
   {
     templateKey: {
       type: String,
@@ -2348,14 +2398,19 @@ var EmailTemplateSchema = new Schema12(
     isActive: { type: Boolean, default: true, index: true },
     triggerEvent: { type: String, required: true, index: true },
     allowedRolesToReceive: [{ type: String }],
+    /** Extra fixed To addresses. */
+    toEmails: [{ type: String }],
+    /** Extra fixed CC addresses. */
     ccRules: [{ type: String }],
     bccRules: [{ type: String }],
-    createdBy: { type: Schema12.Types.ObjectId, ref: "User" },
-    updatedBy: { type: Schema12.Types.ObjectId, ref: "User" }
+    /** Addresses never sent this email, wherever they would otherwise come from. */
+    excludeEmails: [{ type: String }],
+    createdBy: { type: Schema13.Types.ObjectId, ref: "User" },
+    updatedBy: { type: Schema13.Types.ObjectId, ref: "User" }
   },
   { timestamps: true }
 );
-var EmailTemplate = mongoose13.models.EmailTemplate || mongoose13.model("EmailTemplate", EmailTemplateSchema);
+var EmailTemplate = mongoose14.models.EmailTemplate || mongoose14.model("EmailTemplate", EmailTemplateSchema);
 
 // server/lib/email-template-defaults.ts
 var heading = (text2) => `<h2 style="margin:0 0 14px;font-size:18px;font-weight:700;color:#1e293b;">${text2}</h2>`;
@@ -2924,6 +2979,8 @@ async function getActiveTemplateByTrigger(triggerEvent) {
     }
     return doc;
   }
+  const switchedOff = await EmailTemplate.exists({ triggerEvent, isActive: false });
+  if (switchedOff) return null;
   const fallback = DEFAULT_EMAIL_TEMPLATES.find((t) => t.triggerEvent === triggerEvent);
   return fallback || null;
 }
@@ -2955,6 +3012,8 @@ async function updateEmailTemplate(id2, input, userId) {
   if (input.triggerEvent !== void 0) existing.triggerEvent = input.triggerEvent;
   if (input.isActive !== void 0) existing.isActive = input.isActive;
   if (input.allowedRolesToReceive !== void 0) existing.allowedRolesToReceive = input.allowedRolesToReceive;
+  if (input.toEmails !== void 0) existing.toEmails = input.toEmails;
+  if (input.excludeEmails !== void 0) existing.excludeEmails = input.excludeEmails;
   if (input.ccRules !== void 0) existing.ccRules = input.ccRules;
   if (input.bccRules !== void 0) existing.bccRules = input.bccRules;
   existing.supportedVariables = variablesInTemplate(existing.subject, existing.htmlBody, existing.textBody);
@@ -3021,8 +3080,8 @@ async function previewEmailTemplate(templateIdOrTrigger, overrides) {
 import { Types as Types3 } from "mongoose";
 
 // server/models/EmailLog.ts
-import mongoose14, { Schema as Schema13 } from "mongoose";
-var EmailLogSchema = new Schema13(
+import mongoose15, { Schema as Schema14 } from "mongoose";
+var EmailLogSchema = new Schema14(
   {
     templateKey: { type: String, index: true },
     triggerEvent: { type: String, required: true, index: true },
@@ -3037,18 +3096,25 @@ var EmailLogSchema = new Schema13(
       index: true
     },
     errorMessage: { type: String },
-    relatedComplaintId: { type: Schema13.Types.ObjectId, ref: "Complaint", index: true },
-    relatedCapaId: { type: Schema13.Types.ObjectId, ref: "Capa", index: true },
+    relatedComplaintId: { type: Schema14.Types.ObjectId, ref: "Complaint", index: true },
+    relatedCapaId: { type: Schema14.Types.ObjectId, ref: "Capa", index: true },
     sentBySystem: { type: Boolean, default: true },
-    payload: { type: Schema13.Types.Mixed },
+    payload: { type: Schema14.Types.Mixed },
     // Safe context for retry, NEVER credentials
     dedupeKey: { type: String, sparse: true, index: true },
-    attemptCount: { type: Number, default: 1 }
+    attemptCount: { type: Number, default: 1 },
+    /** One thread per complaint (CAPA emails join their complaint's thread). */
+    threadKey: { type: String, index: true },
+    messageId: { type: String },
+    /** True for automated reminder/escalation emails, which are numbered within the thread. */
+    automated: { type: Boolean, default: false },
+    reminderCount: { type: Number },
+    daysDelayed: { type: Number }
   },
   { timestamps: true }
 );
 EmailLogSchema.index({ createdAt: -1 });
-var EmailLog = mongoose14.models.EmailLog || mongoose14.model("EmailLog", EmailLogSchema);
+var EmailLog = mongoose15.models.EmailLog || mongoose15.model("EmailLog", EmailLogSchema);
 
 // server/services/email-log.service.ts
 function sanitizePayload(rawPayload) {
@@ -3082,8 +3148,17 @@ async function writeEmailLog(input) {
     sentBySystem: input.sentBySystem !== void 0 ? input.sentBySystem : true,
     payload: sanitizePayload(input.payload),
     dedupeKey: input.dedupeKey,
-    attemptCount: input.attemptCount || 1
+    attemptCount: input.attemptCount || 1,
+    threadKey: input.threadKey,
+    messageId: input.messageId,
+    automated: input.automated ?? false,
+    reminderCount: input.reminderCount,
+    daysDelayed: input.daysDelayed
   });
+}
+async function getThreadHistory(threadKey) {
+  await connectDB();
+  return EmailLog.find({ threadKey, status: "sent", messageId: { $exists: true, $ne: null } }).sort({ createdAt: 1 }).select("subject messageId triggerEvent createdAt automated reminderCount daysDelayed").lean();
 }
 async function hasDedupeKeyBeenSent(dedupeKey) {
   if (!dedupeKey) return false;
@@ -3129,7 +3204,7 @@ async function queryEmailLogs(query) {
   const skip = (page - 1) * pageSize;
   const [total, items] = await Promise.all([
     EmailLog.countDocuments(filter),
-    EmailLog.find(filter).populate("relatedComplaintId", "complaintNumber title").populate("relatedCapaId", "capaNumber title").sort({ createdAt: -1 }).skip(skip).limit(pageSize).lean()
+    EmailLog.find(filter).populate("relatedComplaintId", "number description").populate("relatedCapaId", "number action").sort({ createdAt: -1 }).skip(skip).limit(pageSize).lean()
   ]);
   return {
     items,
@@ -3144,12 +3219,159 @@ async function queryEmailLogs(query) {
 async function getEmailLogById(id2) {
   if (!Types3.ObjectId.isValid(id2)) throw httpError(400, "Invalid log ID");
   await connectDB();
-  const log = await EmailLog.findById(id2).populate("relatedComplaintId", "complaintNumber title status priority").populate("relatedCapaId", "capaNumber title status").lean();
+  const log = await EmailLog.findById(id2).populate("relatedComplaintId", "number description status priority").populate("relatedCapaId", "number action status").lean();
   if (!log) throw httpError(404, "Email log record not found");
   return log;
 }
 
+// server/models/EmailRouting.ts
+import mongoose16, { Schema as Schema15 } from "mongoose";
+var EmailRoutingSchema = new Schema15(
+  {
+    key: { type: String, required: true, unique: true, default: "global" },
+    /** Copied on every complaint and CAPA email. Empty/unset means the built-in common mailboxes. */
+    commonCc: { type: [String], default: void 0 },
+    /** Never emailed (To, CC or BCC) by any portal email, wherever the address would otherwise come from. */
+    excludeEmails: { type: [String], default: [] },
+    updatedBy: { type: Schema15.Types.ObjectId, ref: "User" }
+  },
+  { timestamps: true }
+);
+var EmailRouting = mongoose16.models.EmailRouting || mongoose16.model("EmailRouting", EmailRoutingSchema);
+
+// server/models/AuditLog.ts
+import mongoose17, { Schema as Schema16 } from "mongoose";
+var AuditLogSchema = new Schema16(
+  {
+    actor: { type: Schema16.Types.ObjectId, ref: "User", index: true },
+    actorName: { type: String, trim: true },
+    action: { type: String, required: true, trim: true, index: true },
+    entity: { type: String, required: true, trim: true, index: true },
+    entityId: { type: String, trim: true, index: true },
+    before: Schema16.Types.Mixed,
+    after: Schema16.Types.Mixed,
+    metadata: Schema16.Types.Mixed
+  },
+  { timestamps: true }
+);
+AuditLogSchema.index({ createdAt: -1 });
+AuditLogSchema.index({ entityId: 1, createdAt: -1 });
+AuditLogSchema.index({ entity: 1, createdAt: -1 });
+AuditLogSchema.index({ action: 1, createdAt: -1 });
+AuditLogSchema.index({ actor: 1, createdAt: -1 });
+var AuditLog = mongoose17.models.AuditLog || mongoose17.model("AuditLog", AuditLogSchema);
+
+// server/services/audit.service.ts
+async function writeAudit(input) {
+  return AuditLog.create({
+    actor: input.actor?.id,
+    actorName: input.actor?.name || "System",
+    action: input.action,
+    entity: input.entity,
+    entityId: input.entityId,
+    before: input.before,
+    after: input.after,
+    metadata: input.metadata
+  });
+}
+
+// server/services/email-routing.service.ts
+var clean = (emails) => Array.from(new Set((emails ?? []).map((email) => email.trim().toLowerCase()).filter(Boolean)));
+async function getEmailRouting() {
+  await connectDB();
+  const doc = await EmailRouting.findOne({ key: "global" }).lean();
+  return {
+    commonCc: doc?.commonCc ? clean(doc.commonCc) : [...COMMON_CC_EMAILS],
+    excludeEmails: clean(doc?.excludeEmails),
+    defaultCommonCc: [...COMMON_CC_EMAILS]
+  };
+}
+async function updateEmailRouting(input, user) {
+  await connectDB();
+  const before = await getEmailRouting();
+  const commonCc = clean(input.commonCc);
+  const excludeEmails = clean(input.excludeEmails);
+  await EmailRouting.findOneAndUpdate(
+    { key: "global" },
+    { $set: { key: "global", commonCc, excludeEmails, updatedBy: user?.id } },
+    { upsert: true, new: true }
+  );
+  await writeAudit({
+    actor: user,
+    action: "MASTER_DATA_CHANGE",
+    entity: "EmailRouting",
+    entityId: "global",
+    before: { commonCc: before.commonCc, excludeEmails: before.excludeEmails },
+    after: { commonCc, excludeEmails }
+  });
+  return getEmailRouting();
+}
+function withoutExcluded(emails, excluded) {
+  return (emails ?? []).filter((email) => !excluded.has(email.trim().toLowerCase()));
+}
+
+// server/domain/email-thread.ts
+var TRIGGER_LABELS = {
+  TAT_REMINDER: "Due-date reminder",
+  TAT_DUE_SOON: "Due-date reminder",
+  TAT_DELAY_DAILY: "Delay reminder",
+  CAPA_DUE_REMINDER: "CAPA due-date reminder",
+  CAPA_OVERDUE: "CAPA overdue reminder",
+  EFFECTIVENESS_REVIEW_DUE: "Effectiveness review reminder"
+};
+var triggerLabel = (trigger) => TRIGGER_LABELS[trigger] ?? trigger;
+var dateText = (date2) => new Date(date2).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+function baseSubject(subject) {
+  return subject.replace(/^\s*((re|fwd?)\s*:\s*)+/i, "").trim();
+}
+function threadSubject(rootSubject) {
+  return `Re: ${baseSubject(rootSubject)}`;
+}
+function nextReminderCount(prior) {
+  return prior.filter((entry) => entry.automated).length + 1;
+}
+function daysDelayedText(daysDelayed) {
+  if (daysDelayed <= 0) return "Not yet delayed (due soon)";
+  return `${daysDelayed} day${daysDelayed === 1 ? "" : "s"} delayed`;
+}
+function buildReminderBanner(input) {
+  const history = input.prior.filter((entry) => entry.automated);
+  const rows = history.map((entry, index) => ({
+    count: entry.reminderCount ?? index + 1,
+    date: dateText(entry.createdAt),
+    label: triggerLabel(entry.triggerEvent),
+    delay: daysDelayedText(entry.daysDelayed ?? 0)
+  })).slice(-10);
+  const heading2 = `Reminder #${input.reminderCount} \xB7 ${daysDelayedText(input.daysDelayed)}`;
+  const historyHtml = rows.length ? `<table role="presentation" cellpadding="0" cellspacing="0" style="margin-top:10px;width:100%;border-collapse:collapse;font-size:12px;color:#334155;">
+        <tr><td style="padding:4px 6px;font-weight:700;border-bottom:1px solid #fecaca;">#</td><td style="padding:4px 6px;font-weight:700;border-bottom:1px solid #fecaca;">Sent</td><td style="padding:4px 6px;font-weight:700;border-bottom:1px solid #fecaca;">Reminder</td><td style="padding:4px 6px;font-weight:700;border-bottom:1px solid #fecaca;">Status then</td></tr>
+        ${rows.map(
+    (row) => `<tr><td style="padding:4px 6px;">${row.count}</td><td style="padding:4px 6px;">${escapeHtml(row.date)}</td><td style="padding:4px 6px;">${escapeHtml(row.label)}</td><td style="padding:4px 6px;">${escapeHtml(row.delay)}</td></tr>`
+  ).join("")}
+      </table>` : "";
+  const html = `
+              <div style="margin:16px 0;padding:14px 16px;background-color:#fef2f2;border-left:3px solid #E31E25;border-radius:4px;color:#7f1d1d;font-size:13px;line-height:1.5;">
+                <strong style="font-size:14px;">${escapeHtml(heading2)}</strong>
+                ${rows.length ? `<div style="margin-top:6px;color:#475569;">Previous reminders in this thread:</div>` : `<div style="margin-top:6px;color:#475569;">This is the first reminder in this thread. Later reminders will be added to the same thread.</div>`}
+                ${historyHtml}
+              </div>`;
+  const text2 = [
+    "",
+    heading2,
+    ...rows.length ? ["Previous reminders in this thread:", ...rows.map((row) => `  #${row.count} - ${row.date} - ${row.label} - ${row.delay}`)] : ["This is the first reminder in this thread."]
+  ].join("\n");
+  return { html, text: text2, heading: heading2 };
+}
+function applyReminderBanner(body, banner) {
+  const footerMarker = "          <!-- Footer -->";
+  const html = body.html.includes(footerMarker) ? body.html.replace(footerMarker, `${banner.html}
+${footerMarker}`) : `${body.html}${banner.html}`;
+  return { html, text: `${body.text}
+${banner.text}` };
+}
+
 // server/services/email.service.ts
+import { randomUUID } from "node:crypto";
 function normalizePortalLinks(data, appUrl) {
   const normalized = { ...data };
   for (const [key, value] of Object.entries(normalized)) {
@@ -3190,7 +3412,29 @@ async function recordBlockedAddresses(input, blocked) {
     sentBySystem: input.sentBySystem !== void 0 ? input.sentBySystem : true
   }).catch(() => void 0);
 }
+async function resolveThreadKey(complaintId, capaId) {
+  if (complaintId) return `CMP_${String(complaintId)}`;
+  if (!capaId) return void 0;
+  const capa = await Capa.findById(capaId).select("complaint").lean().catch(() => null);
+  return capa?.complaint ? `CMP_${String(capa.complaint)}` : `CAPA_${String(capaId)}`;
+}
+function newMessageId() {
+  const domain = /@([^>\s]+)>?$/.exec(fromAddress())?.[1] ?? "onepws.com";
+  return `<${randomUUID()}@${domain}>`;
+}
+async function complaintRelatedEmails(input) {
+  let complaintId = input.relatedComplaintId;
+  if (!complaintId && input.relatedCapaId) {
+    const capa = await Capa.findById(input.relatedCapaId).select("complaint").lean().catch(() => null);
+    complaintId = capa?.complaint;
+  }
+  if (!complaintId) return [];
+  const complaint = await Complaint.findById(complaintId).select("relatedEmails").lean().catch(() => null);
+  return Array.isArray(complaint?.relatedEmails) ? complaint.relatedEmails : [];
+}
 async function sendTemplatedEmail(input) {
+  const relatedEmails = await complaintRelatedEmails(input);
+  if (relatedEmails.length > 0) input = { ...input, cc: [...input.cc ?? [], ...relatedEmails] };
   const toPolicy = splitByEmailPolicy(input.recipients);
   const ccPolicy = splitByEmailPolicy(input.cc);
   const bccPolicy = splitByEmailPolicy(input.bcc);
@@ -3229,22 +3473,27 @@ async function sendTemplatedEmail(input) {
     });
     return { status: "skipped", logId: String(skippedLog._id), message: "No active template" };
   }
-  const cleanRecipients = (input.recipients || []).filter(Boolean);
+  const routing = await getEmailRouting();
+  const excluded = new Set([...routing.excludeEmails, ...template.excludeEmails ?? []].map((email) => email.trim().toLowerCase()));
+  const uniqueLower = (emails) => Array.from(new Set(emails.map((email) => email.trim().toLowerCase()).filter(Boolean)));
+  const requestedTo = [...(input.recipients || []).filter(Boolean), ...splitByEmailPolicy(template.toEmails).allowed];
+  const cleanRecipients = withoutExcluded(uniqueLower(requestedTo), excluded);
   if (cleanRecipients.length === 0) {
+    const removedByRule = requestedTo.length > 0;
     const skippedLog = await writeEmailLog({
       templateKey: template.templateKey,
       triggerEvent: input.triggerEvent,
       recipients: [],
       status: "skipped",
-      errorMessage: "No valid recipient email addresses resolved",
+      errorMessage: removedByRule ? "Every recipient is on the exclusion list" : "No valid recipient email addresses resolved",
       relatedComplaintId: input.relatedComplaintId,
       relatedCapaId: input.relatedCapaId,
       dedupeKey: input.dedupeKey,
       sentBySystem: input.sentBySystem !== void 0 ? input.sentBySystem : true
     });
-    return { status: "skipped", logId: String(skippedLog._id), message: "No recipients" };
+    return { status: "skipped", logId: String(skippedLog._id), message: removedByRule ? "All recipients excluded" : "No recipients" };
   }
-  const excludeManagement = input.excludeManagement ?? excludesManagementByDefault(input.triggerEvent);
+  const excludeManagement = input.automated ? true : input.excludeManagement ?? excludesManagementByDefault(input.triggerEvent);
   const departmentCc = await resolveDepartmentCc({
     complaintId: input.relatedComplaintId,
     capaId: input.relatedCapaId,
@@ -3252,13 +3501,15 @@ async function sendTemplatedEmail(input) {
   }).catch(() => []);
   const isCaseEmail = Boolean(input.relatedComplaintId || input.relatedCapaId);
   const recipientChainCc = isCaseEmail ? await resolveRecipientChainCc(cleanRecipients).catch(() => []) : [];
-  const commonCc = isCaseEmail ? COMMON_CC_EMAILS : [];
-  const ccList = Array.from(
-    new Set([...input.cc ?? [], ...commonCc, ...departmentCc, ...recipientChainCc].map((email) => email.trim().toLowerCase()).filter(Boolean))
+  const commonCc = isCaseEmail ? routing.commonCc : [];
+  const ccList = withoutExcluded(
+    uniqueLower([...input.cc ?? [], ...commonCc, ...template.ccRules ?? [], ...departmentCc, ...recipientChainCc]),
+    excluded
   ).filter((email) => !cleanRecipients.some((to) => to.trim().toLowerCase() === email));
   const finalCc = splitByEmailPolicy(ccList);
   if (finalCc.blocked.length > 0) await recordBlockedAddresses(input, finalCc.blocked);
-  input = { ...input, cc: finalCc.allowed };
+  const finalBcc = splitByEmailPolicy(withoutExcluded(uniqueLower([...input.bcc ?? [], ...template.bccRules ?? []]), excluded));
+  input = { ...input, cc: finalCc.allowed, bcc: finalBcc.allowed };
   const appUrl = getAppUrl();
   const today = (/* @__PURE__ */ new Date()).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
   const normalizedInputData = normalizePortalLinks(input.data, appUrl);
@@ -3270,10 +3521,31 @@ async function sendTemplatedEmail(input) {
     recipientName: cleanRecipients[0],
     ...normalizedInputData
   };
-  const renderedSubject = renderTemplate(template.subject, mergedData).rendered;
+  let renderedSubject = renderTemplate(template.subject, mergedData).rendered;
   const renderedHtml = renderTemplate(template.htmlBody, mergedData).rendered;
   const renderedText = renderTemplate(template.textBody, mergedData).rendered;
-  const finalBody = appendTemporaryPasswordNotice(renderedHtml, renderedText, mergedData);
+  let finalBody = appendTemporaryPasswordNotice(renderedHtml, renderedText, mergedData);
+  const threadKey = await resolveThreadKey(input.relatedComplaintId, input.relatedCapaId);
+  const history = threadKey ? await getThreadHistory(threadKey).catch(() => []) : [];
+  const root = history[0];
+  let reminderCount;
+  if (root) renderedSubject = threadSubject(root.subject || renderedSubject);
+  if (input.automated) {
+    reminderCount = nextReminderCount(history);
+    const banner = buildReminderBanner({ reminderCount, daysDelayed: input.automated.daysDelayed, prior: history });
+    finalBody = applyReminderBanner(finalBody, banner);
+    mergedData.reminderCount = reminderCount;
+    mergedData.daysDelayed = input.automated.daysDelayed;
+  }
+  const messageId = threadKey ? newMessageId() : void 0;
+  const threadHeaders = threadKey && root ? { inReplyTo: root.messageId, references: history.slice(-20).map((entry) => entry.messageId) } : {};
+  const threadFields = {
+    threadKey,
+    messageId,
+    automated: Boolean(input.automated),
+    reminderCount,
+    daysDelayed: input.automated?.daysDelayed
+  };
   if (!isSmtpConfigured()) {
     const skippedLog = await writeEmailLog({
       templateKey: template.templateKey,
@@ -3301,7 +3573,9 @@ async function sendTemplatedEmail(input) {
       bcc: input.bcc && input.bcc.length > 0 ? input.bcc : void 0,
       subject: renderedSubject,
       html: finalBody.html,
-      text: finalBody.text
+      text: finalBody.text,
+      ...messageId ? { messageId } : {},
+      ...threadHeaders
     });
     const sentLog = await writeEmailLog({
       templateKey: template.templateKey,
@@ -3314,7 +3588,8 @@ async function sendTemplatedEmail(input) {
       relatedComplaintId: input.relatedComplaintId,
       relatedCapaId: input.relatedCapaId,
       dedupeKey: input.dedupeKey,
-      sentBySystem: input.sentBySystem !== void 0 ? input.sentBySystem : true
+      sentBySystem: input.sentBySystem !== void 0 ? input.sentBySystem : true,
+      ...threadFields
     });
     return { status: "sent", logId: String(sentLog._id) };
   } catch (error) {
@@ -3395,6 +3670,226 @@ Portal: ${appUrl}` });
   }
 }
 
+// server/services/attachment.service.ts
+import { v2 as cloudinary } from "cloudinary";
+import { Types as Types4 } from "mongoose";
+
+// server/domain/upload-rules.ts
+var DANGEROUS_EXTENSIONS = [
+  ".exe",
+  ".dll",
+  ".bat",
+  ".cmd",
+  ".com",
+  ".msi",
+  ".scr",
+  ".js",
+  ".mjs",
+  ".vbs",
+  ".ps1",
+  ".sh",
+  ".jar",
+  ".php",
+  ".html",
+  ".htm",
+  ".svg"
+];
+function sanitizeFilename(filename) {
+  const base = filename.split(/[\\/]/).pop() ?? "file";
+  const cleaned = base.replace(/[\u0000-\u001f<>:"|?*]/g, "").replace(/^\.+/, "").trim();
+  return (cleaned || "file").slice(0, 180);
+}
+function validateUpload(file) {
+  const issues = [];
+  const name2 = sanitizeFilename(file.originalname);
+  if (!name2) issues.push({ field: "file", message: "A file name is required" });
+  if (DANGEROUS_EXTENSIONS.some((extension) => name2.toLowerCase().endsWith(extension))) {
+    issues.push({ field: "file", message: "This file type is not allowed" });
+  }
+  if (!ALLOWED_UPLOAD_MIME_TYPES.includes(file.mimetype)) {
+    issues.push({ field: "file", message: `Unsupported file type: ${file.mimetype}` });
+  }
+  if (!file.size || file.size <= 0) {
+    issues.push({ field: "file", message: "The uploaded file is empty" });
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    issues.push({ field: "file", message: `Maximum upload size is ${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MB` });
+  }
+  return issues;
+}
+function buildAttachmentMetadata(result, file) {
+  if (!result.public_id || !result.secure_url) {
+    throw new Error("Cloudinary did not return a usable asset reference");
+  }
+  return {
+    publicId: result.public_id,
+    secureUrl: result.secure_url,
+    resourceType: result.resource_type ?? "raw",
+    originalFilename: sanitizeFilename(file.originalname),
+    mimeType: file.mimetype,
+    bytes: result.bytes ?? file.size,
+    width: result.width,
+    height: result.height
+  };
+}
+
+// server/models/Attachment.ts
+import mongoose18, { Schema as Schema17 } from "mongoose";
+var AttachmentSchema = new Schema17(
+  {
+    publicId: { type: String, required: true, trim: true, index: true },
+    secureUrl: { type: String, required: true, trim: true },
+    resourceType: { type: String, required: true, trim: true, default: "raw" },
+    originalFilename: { type: String, required: true, trim: true },
+    mimeType: { type: String, required: true, trim: true },
+    bytes: { type: Number, required: true },
+    width: Number,
+    height: Number,
+    entityType: { type: String, required: true, trim: true, index: true },
+    entityId: { type: Schema17.Types.ObjectId, required: true, index: true },
+    purpose: { type: String, enum: ATTACHMENT_PURPOSES, required: true, index: true },
+    company: { type: Schema17.Types.ObjectId, ref: "Company", index: true },
+    uploadedBy: { type: Schema17.Types.ObjectId, ref: "User", index: true },
+    uploadedAt: { type: Date, default: Date.now }
+  },
+  { timestamps: true }
+);
+AttachmentSchema.index({ entityType: 1, entityId: 1, purpose: 1 });
+var Attachment = mongoose18.models.Attachment || mongoose18.model("Attachment", AttachmentSchema);
+
+// server/services/attachment.service.ts
+var SAFE_FOLDER = /^[a-zA-Z0-9_-]{1,64}$/;
+function configuredCloudinary() {
+  const env = getEnv();
+  const missing = ["CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"].filter((key) => !env[key]?.trim());
+  if (missing.length > 0) {
+    throw httpError(503, `Cloudinary is not configured on this environment (empty or missing: ${missing.join(", ")})`);
+  }
+  cloudinary.config({
+    cloud_name: env.CLOUDINARY_CLOUD_NAME,
+    api_key: env.CLOUDINARY_API_KEY,
+    api_secret: env.CLOUDINARY_API_SECRET,
+    secure: true
+  });
+  return { cloudinary, env };
+}
+function folderFor(purpose) {
+  const suffix = purpose.replace(/[^a-zA-Z0-9_-]/g, "-");
+  if (!SAFE_FOLDER.test(suffix)) throw httpError(400, "Invalid upload folder");
+  const env = getEnv();
+  return `${env.CLOUDINARY_UPLOAD_FOLDER || "onepws-complaint-capa"}/${suffix}`;
+}
+function createUploadSignature(purpose) {
+  const { cloudinary: client, env } = configuredCloudinary();
+  const timestamp = Math.round(Date.now() / 1e3);
+  const folder = folderFor(purpose);
+  const signature3 = client.utils.api_sign_request({ timestamp, folder }, env.CLOUDINARY_API_SECRET);
+  return {
+    timestamp,
+    folder,
+    signature: signature3,
+    apiKey: env.CLOUDINARY_API_KEY,
+    cloudName: env.CLOUDINARY_CLOUD_NAME,
+    maxBytes: MAX_UPLOAD_BYTES,
+    allowedMimeTypes: [...ALLOWED_UPLOAD_MIME_TYPES]
+  };
+}
+async function confirmUpload(input, user) {
+  if (!user) throw httpError(401, "Unauthorized");
+  const { cloudinary: client } = configuredCloudinary();
+  const folder = folderFor(input.purpose);
+  if (!input.publicId.startsWith(`${folder}/`)) {
+    throw businessRuleError("This asset does not belong to the declared upload folder", [
+      { field: "publicId", message: "Upload the file with the signature issued for this purpose" }
+    ]);
+  }
+  let resource = null;
+  for (const resourceType of ["image", "video", "raw"]) {
+    try {
+      resource = await client.api.resource(input.publicId, { resource_type: resourceType });
+      break;
+    } catch (error) {
+      const failure = error;
+      const status = failure.http_code ?? failure.error?.http_code;
+      if (status !== void 0 && status !== 404) {
+        const reason = failure.error?.message ?? failure.message ?? "unknown error";
+        throw httpError(502, `Cloudinary rejected the verification request (HTTP ${status}: ${reason})`);
+      }
+    }
+  }
+  if (!resource) throw httpError(404, "The uploaded asset could not be found on Cloudinary");
+  const issues = validateUpload({
+    originalname: input.originalFilename,
+    mimetype: input.mimeType,
+    size: resource.bytes ?? 0
+  });
+  if (issues.length > 0) {
+    await client.uploader.destroy(input.publicId, { resource_type: resource.resource_type ?? "raw" }).catch(() => void 0);
+    throw businessRuleError("This file was rejected", issues);
+  }
+  const metadata = buildAttachmentMetadata(resource, {
+    originalname: input.originalFilename,
+    mimetype: input.mimeType,
+    size: resource.bytes ?? 0
+  });
+  const attachment = await Attachment.create({
+    ...metadata,
+    entityType: input.entityType,
+    entityId: new Types4.ObjectId(input.entityId),
+    purpose: input.purpose,
+    company: input.company ? new Types4.ObjectId(input.company) : void 0,
+    uploadedBy: new Types4.ObjectId(user.id),
+    uploadedAt: /* @__PURE__ */ new Date()
+  });
+  await writeAudit({
+    actor: user,
+    action: "UPLOAD",
+    entity: "Attachment",
+    entityId: String(attachment._id),
+    after: { filename: metadata.originalFilename, bytes: metadata.bytes, purpose: input.purpose }
+  });
+  return attachment;
+}
+async function listAttachments(entityType, entityId) {
+  if (!Types4.ObjectId.isValid(entityId)) throw httpError(400, "Invalid entity id");
+  return Attachment.find({ entityType, entityId }).populate("uploadedBy", "name").sort({ createdAt: -1 }).lean();
+}
+async function deleteAttachment(attachmentId, user, allowed) {
+  if (!user) throw httpError(401, "Unauthorized");
+  if (!allowed) throw httpError(403, "You do not have permission to delete this file");
+  if (!Types4.ObjectId.isValid(attachmentId)) throw httpError(400, "Invalid attachment id");
+  const attachment = await Attachment.findById(attachmentId);
+  if (!attachment) throw httpError(404, "Attachment not found");
+  try {
+    const { cloudinary: client } = configuredCloudinary();
+    await client.uploader.destroy(attachment.publicId, { resource_type: attachment.resourceType }).catch(() => void 0);
+  } catch {
+  }
+  await Attachment.deleteOne({ _id: attachment._id });
+  await writeAudit({
+    actor: user,
+    action: "DELETE_ATTACHMENT",
+    entity: "Attachment",
+    entityId: attachmentId,
+    before: { filename: attachment.originalFilename, publicId: attachment.publicId }
+  });
+  return { deleted: true, filename: sanitizeFilename(attachment.originalFilename) };
+}
+async function purgeAttachmentsFor(entityType, entityIds) {
+  if (entityIds.length === 0) return 0;
+  const attachments = await Attachment.find({ entityType, entityId: { $in: entityIds } }).lean();
+  if (attachments.length === 0) return 0;
+  try {
+    const { cloudinary: client } = configuredCloudinary();
+    for (const attachment of attachments) {
+      await client.uploader.destroy(attachment.publicId, { resource_type: attachment.resourceType }).catch(() => void 0);
+    }
+  } catch {
+  }
+  await Attachment.deleteMany({ _id: { $in: attachments.map((attachment) => attachment._id) } });
+  return attachments.length;
+}
+
 // server/domain/numbering.ts
 function financialYearLabel(reference = /* @__PURE__ */ new Date()) {
   const date2 = reference instanceof Date ? reference : new Date(reference);
@@ -3414,17 +3909,17 @@ function formatCapaNumber(complaintNumber, index, padding = 2) {
 }
 
 // server/models/Counter.ts
-import mongoose15, { Schema as Schema14 } from "mongoose";
-var CounterSchema = new Schema14(
+import mongoose19, { Schema as Schema18 } from "mongoose";
+var CounterSchema = new Schema18(
   {
     key: { type: String, required: true, unique: true, trim: true, index: true },
-    company: { type: Schema14.Types.ObjectId, ref: "Company", index: true },
+    company: { type: Schema18.Types.ObjectId, ref: "Company", index: true },
     financialYear: { type: String, trim: true },
     sequence: { type: Number, required: true, default: 0 }
   },
   { timestamps: true }
 );
-var Counter = mongoose15.models.Counter || mongoose15.model("Counter", CounterSchema);
+var Counter = mongoose19.models.Counter || mongoose19.model("Counter", CounterSchema);
 
 // server/services/numbering.service.ts
 var mongoCounterStore = {
@@ -3449,44 +3944,7 @@ async function nextCapaNumber(companyId, complaintNumber, sequence) {
   return formatCapaNumber(complaintNumber, sequence, config.capaSequencePadding);
 }
 
-// server/models/AuditLog.ts
-import mongoose16, { Schema as Schema15 } from "mongoose";
-var AuditLogSchema = new Schema15(
-  {
-    actor: { type: Schema15.Types.ObjectId, ref: "User", index: true },
-    actorName: { type: String, trim: true },
-    action: { type: String, required: true, trim: true, index: true },
-    entity: { type: String, required: true, trim: true, index: true },
-    entityId: { type: String, trim: true, index: true },
-    before: Schema15.Types.Mixed,
-    after: Schema15.Types.Mixed,
-    metadata: Schema15.Types.Mixed
-  },
-  { timestamps: true }
-);
-AuditLogSchema.index({ createdAt: -1 });
-AuditLogSchema.index({ entityId: 1, createdAt: -1 });
-AuditLogSchema.index({ entity: 1, createdAt: -1 });
-AuditLogSchema.index({ action: 1, createdAt: -1 });
-AuditLogSchema.index({ actor: 1, createdAt: -1 });
-var AuditLog = mongoose16.models.AuditLog || mongoose16.model("AuditLog", AuditLogSchema);
-
-// server/services/audit.service.ts
-async function writeAudit(input) {
-  return AuditLog.create({
-    actor: input.actor?.id,
-    actorName: input.actor?.name || "System",
-    action: input.action,
-    entity: input.entity,
-    entityId: input.entityId,
-    before: input.before,
-    after: input.after,
-    metadata: input.metadata
-  });
-}
-
 // server/services/complaint.service.ts
-var COMPLAINT_CREATED_FIXED_CC = COMMON_CC_EMAILS;
 function gapsToIssues(gaps) {
   return gaps.map((gap) => ({ field: gap.field, section: gap.section, message: gap.hint ? `${gap.field} \u2014 ${gap.hint}` : gap.field }));
 }
@@ -3503,9 +3961,8 @@ async function requireActor(user) {
   return actor;
 }
 async function loadComplaintContext(complaintId, user) {
-  if (!Types4.ObjectId.isValid(complaintId)) throw httpError(400, "Invalid complaint id");
-  const actor = await requireActor(user);
-  const doc = await Complaint.findById(complaintId);
+  if (!Types5.ObjectId.isValid(complaintId)) throw httpError(400, "Invalid complaint id");
+  const [actor, doc] = await Promise.all([requireActor(user), Complaint.findById(complaintId)]);
   if (!doc) throw httpError(404, "Complaint not found");
   const domain = toDomainComplaint(doc, await priorityMultiplier(doc.priority));
   if (!canViewComplaint(actor, domain)) throw httpError(403, "You do not have access to this complaint");
@@ -3524,7 +3981,7 @@ async function loadDomainCapas(complaintId) {
   return capas.map(toDomainCapa);
 }
 function pushWorkflowLog(doc, stage, actor, notes) {
-  doc.workflowLog.push({ stage, at: /* @__PURE__ */ new Date(), by: new Types4.ObjectId(actor.id), byName: actor.name, notes });
+  doc.workflowLog.push({ stage, at: /* @__PURE__ */ new Date(), by: new Types5.ObjectId(actor.id), byName: actor.name, notes });
 }
 async function createComplaint(input, user) {
   const actor = await requireActor(user);
@@ -3559,6 +4016,7 @@ async function createComplaint(input, user) {
     description: input.description,
     owner: input.owner ?? actor.id,
     ownerEmployee: ownerEmployee?._id,
+    relatedEmails: input.relatedEmails,
     createdBy: actor.id,
     workflowLog: [{ stage: "Registered", at: /* @__PURE__ */ new Date(), by: actor.id, byName: actor.name, notes: "Complaint registered" }]
   });
@@ -3594,7 +4052,7 @@ async function createComplaint(input, user) {
       "repeatOf",
       matches.map((match) => {
         const source = population.find((entry) => String(entry._id) === match.complaintId);
-        return { complaint: new Types4.ObjectId(match.complaintId), number: source?.number ?? "", basis: match.basis };
+        return { complaint: new Types5.ObjectId(match.complaintId), number: source?.number ?? "", basis: match.basis };
       })
     );
     doc.repeatBasis = describeRepeatBasis(matches);
@@ -3624,18 +4082,20 @@ async function createComplaint(input, user) {
   const emailCc = await resolveRecipients({
     complaintId: doc._id,
     targetRoles: ["Manager", "Department Head"],
-    explicitEmails: COMPLAINT_CREATED_FIXED_CC
+    explicitEmails: (await getEmailRouting()).commonCc
   });
   if (emailRecipients.length > 0) {
-    const [ownerUser, responsibleDepartment] = await Promise.all([
+    const [ownerUser, responsibleDepartment, priority] = await Promise.all([
       doc.owner ? User.findById(doc.owner).select("name email").lean() : null,
-      doc.responsibleDept ? Department.findById(doc.responsibleDept).select("name").lean() : null
+      doc.responsibleDept ? Department.findById(doc.responsibleDept).select("name").lean() : null,
+      doc.priority ? Priority.findById(doc.priority).select("name").lean() : null
     ]);
     const cc = emailCc.filter((email) => !emailRecipients.includes(email));
     await sendTemplatedEmail({
       triggerEvent: "COMPLAINT_CREATED",
       recipients: emailRecipients,
       cc,
+      dedupeKey: `COMPLAINT_CREATED_${doc._id}`,
       relatedComplaintId: doc._id,
       data: {
         recipientName: ownerEmployee?.name ?? ownerUser?.name ?? "Complaint Owner",
@@ -3645,7 +4105,7 @@ async function createComplaint(input, user) {
         customerName: doc.customer || "Internal Issue",
         partName: doc.product || "Component",
         partNumber: "N/A",
-        priority: String(doc.priority || "Standard"),
+        priority: priority?.name ?? "Standard",
         departmentName: responsibleDepartment?.name ?? "",
         coordinatorName: actor.name,
         ackDueDate: "Within 24h",
@@ -3776,17 +4236,18 @@ async function listComplaints(query, user) {
     throw httpError(403, "You do not have permission to view complaints");
   }
   const filter = {};
-  if (!hasPermission(actor, "view.all")) filter.company = { $in: actor.companyIds.map((id2) => new Types4.ObjectId(id2)) };
+  if (!hasPermission(actor, "view.all")) filter.company = { $in: actor.companyIds.map((id2) => new Types5.ObjectId(id2)) };
   if (query.company) {
     if (!canSeeCompany(actor, query.company)) throw httpError(403, "You do not have access to this company");
-    filter.company = new Types4.ObjectId(query.company);
+    filter.company = new Types5.ObjectId(query.company);
   }
   if (query.type) filter.type = query.type;
   if (query.status) filter.status = query.status;
-  if (query.priority) filter.priority = new Types4.ObjectId(query.priority);
+  if (query.priority) filter.priority = new Types5.ObjectId(query.priority);
   if (query.category) filter.category = query.category;
-  if (query.responsibleDept) filter.responsibleDept = new Types4.ObjectId(query.responsibleDept);
-  if (query.owner) filter.owner = new Types4.ObjectId(query.owner);
+  if (query.responsibleDept) filter.responsibleDept = new Types5.ObjectId(query.responsibleDept);
+  if (query.owner) filter.owner = new Types5.ObjectId(query.owner);
+  if (query.ownerEmployee) filter.ownerEmployee = new Types5.ObjectId(query.ownerEmployee);
   if (typeof query.isRepeat === "boolean") filter.isRepeat = query.isRepeat;
   if (query.receivedFrom || query.receivedTo) {
     const receivedTo = query.receivedTo ? new Date(query.receivedTo) : void 0;
@@ -3811,23 +4272,26 @@ async function listComplaints(query, user) {
 }
 async function getComplaintDetail(complaintId, user) {
   const context = await loadComplaintContext(complaintId, user);
-  const tatConfig = await resolveTatConfig(context.doc.company);
-  const capas = await Capa.find({ complaint: context.doc._id }).populate("owner", "name").sort({ sequence: 1 }).lean();
   const { priority, internalDept, againstDept, responsibleDept } = context.doc;
-  const [ownerUser, ownerEmployee, priorityDoc, departments] = await Promise.all([
+  const closedAt = context.doc.closedAt;
+  const [tatConfig, capas, ownerUser, ownerEmployee, priorityDoc, companyDoc, departments, checksDone] = await Promise.all([
+    resolveTatConfig(context.doc.company),
+    Capa.find({ complaint: context.doc._id }).populate("owner", "name").populate("ownerEmployee", "name").sort({ sequence: 1 }).lean(),
     context.doc.owner ? User.findById(context.doc.owner).select("name").lean() : null,
     context.doc.ownerEmployee ? Employee.findById(context.doc.ownerEmployee).select("name").lean() : null,
     priority ? Priority.findById(priority).select("name").lean() : null,
-    Department.find({ _id: { $in: [internalDept, againstDept, responsibleDept].filter(Boolean) } }).select("name").lean()
+    Company.findById(context.doc.company).select("name code").lean(),
+    Department.find({ _id: { $in: [internalDept, againstDept, responsibleDept].filter(Boolean) } }).select("name").lean(),
+    // A closed complaint is re-checked every six months; the next check follows the ones already recorded.
+    closedAt ? EffectivenessCheck.countDocuments({ complaint: context.doc._id, closedAt }) : 0
   ]);
   const departmentName = (id2) => id2 ? departments.find((entry) => String(entry._id) === String(id2))?.name : void 0;
-  const closedAt = context.doc.closedAt;
-  const checksDone = closedAt ? await EffectivenessCheck.countDocuments({ complaint: context.doc._id, closedAt }) : 0;
   return {
     complaint: {
       ...context.doc.toObject(),
       // The stored references are ids; the page shows these resolved names instead of raw ids.
       priorityName: priorityDoc?.name,
+      companyName: companyDoc?.name,
       internalDeptName: departmentName(internalDept),
       againstDeptName: departmentName(againstDept),
       responsibleDeptName: departmentName(responsibleDept),
@@ -3979,7 +4443,7 @@ async function signComplaint(complaintId, role, notes, user) {
     notes
   );
   context.doc.set(`signatures.${role}`, {
-    user: new Types4.ObjectId(record.userId),
+    user: new Types5.ObjectId(record.userId),
     name: record.name,
     designation: record.designation,
     department: record.department,
@@ -4054,31 +4518,43 @@ async function closeComplaint(complaintId, input, user) {
   const context = await loadComplaintContext(complaintId, user);
   if (!canCloseComplaint(context.actor, context.domain)) throw httpError(403, "You do not have permission to close complaints");
   if (context.doc.closedAt) throw httpError(409, "This complaint is already closed");
+  const forceCloseAll = Boolean(input.forceCloseAll);
+  if (forceCloseAll && !isMasterAdmin(context.actor)) throw httpError(403, "Only a Master Admin can force close a complaint");
   const capas = await loadDomainCapas(complaintId);
   const gaps = validateForClosure(context.domain, capas);
-  if (gaps.length > 0) {
+  if (gaps.length > 0 && !forceCloseAll) {
     throw businessRuleError(`This complaint cannot be closed yet (${gaps.length} mandatory item(s) missing)`, gapsToIssues(gaps));
   }
   const openCapas = openCapaWarnings(capas);
-  if (openCapas.length > 0 && !input.force) {
+  if (openCapas.length > 0 && !input.force && !forceCloseAll) {
     throw businessRuleError("Some CAPAs are still open", [
       { field: "capas", section: "CAPA", message: `Still open: ${openCapas.join(", ")}. Resend with force to close anyway.` }
     ]);
   }
   const now = /* @__PURE__ */ new Date();
   context.doc.closedAt = now;
-  context.doc.closedBy = new Types4.ObjectId(context.actor.id);
+  context.doc.closedBy = new Types5.ObjectId(context.actor.id);
   context.doc.closureRemarks = input.closureRemarks;
   context.doc.d7NoRepeatConfirmed = input.noRepeatConfirmed;
   context.doc.status = "Closed";
-  pushWorkflowLog(context.doc, "Closed", context.actor, input.closureRemarks);
+  pushWorkflowLog(
+    context.doc,
+    "Closed",
+    context.actor,
+    forceCloseAll ? `Force closed by Master Admin${gaps.length ? ` with ${gaps.length} mandatory item(s) incomplete` : ""}. ${input.closureRemarks}` : input.closureRemarks
+  );
   await context.doc.save();
   await writeAudit({
     actor: user,
     action: "CLOSE",
     entity: "Complaint",
     entityId: complaintId,
-    after: { closedAt: now.toISOString(), remarks: input.closureRemarks, forcedOverOpenCapas: openCapas }
+    after: {
+      closedAt: now.toISOString(),
+      remarks: input.closureRemarks,
+      forcedOverOpenCapas: openCapas,
+      ...forceCloseAll ? { forceClosed: true, skippedRequirements: gaps.map((gap) => `${gap.section}: ${gap.field}`) } : {}
+    }
   });
   await notify({
     recipients: [context.doc.owner].filter(Boolean),
@@ -4156,7 +4632,7 @@ async function reviewRepeatLinkage(complaintId, input, user) {
   }
   const before = { isRepeat: context.doc.isRepeat };
   context.doc.isRepeat = input.isRepeat;
-  context.doc.repeatReviewedBy = new Types4.ObjectId(context.actor.id);
+  context.doc.repeatReviewedBy = new Types5.ObjectId(context.actor.id);
   context.doc.repeatReviewedAt = /* @__PURE__ */ new Date();
   context.doc.repeatReviewRemarks = input.remarks;
   await context.doc.save();
@@ -4178,7 +4654,7 @@ async function saveOverallEffectiveness(complaintId, input, user) {
   context.doc.overallEffectiveness = {
     result: input.result,
     at: input.at ?? /* @__PURE__ */ new Date(),
-    by: new Types4.ObjectId(context.actor.id),
+    by: new Types5.ObjectId(context.actor.id),
     comments: input.comments
   };
   await context.doc.save();
@@ -4203,7 +4679,15 @@ async function deleteComplaint(complaintId, confirmation, user) {
     ]);
   }
   const snapshot = context.doc.toObject();
-  await Capa.deleteMany({ complaint: context.doc._id });
+  const capaIds = (await Capa.find({ complaint: context.doc._id }).select("_id").lean()).map((capa) => capa._id);
+  await purgeAttachmentsFor("Capa", capaIds);
+  await purgeAttachmentsFor("Complaint", [context.doc._id]);
+  await Promise.all([
+    Capa.deleteMany({ complaint: context.doc._id }),
+    ComplaintNote.deleteMany({ complaint: context.doc._id }),
+    EffectivenessCheck.deleteMany({ complaint: context.doc._id }),
+    Notification.deleteMany({ entityId: { $in: [context.doc._id, ...capaIds] } })
+  ]);
   await Complaint.deleteOne({ _id: context.doc._id });
   await writeAudit({ actor: user, action: "DELETE", entity: "Complaint", entityId: complaintId, before: { number: snapshot.number } });
   return { deleted: true, number: snapshot.number };
@@ -4230,11 +4714,11 @@ async function resolveScope(user, companyId) {
   }
   const filter = {};
   if (!hasPermission(actor, "view.all")) {
-    filter.company = { $in: actor.companyIds.map((id2) => new Types5.ObjectId(id2)) };
+    filter.company = { $in: actor.companyIds.map((id2) => new Types6.ObjectId(id2)) };
   }
   if (companyId) {
     if (!canSeeCompany(actor, companyId)) throw httpError(403, "You do not have access to this company");
-    filter.company = new Types5.ObjectId(companyId);
+    filter.company = new Types6.ObjectId(companyId);
   }
   return { filter, companyId: companyId ?? null };
 }
@@ -4360,7 +4844,7 @@ async function dashboardAnalytics(user, companyId, range, type) {
   }).select("status dueDate effectiveness completedAt owner").lean();
   const capaClosed = capaRows.filter((capa) => capa.status === "Closed" || capa.status === "Completed").length;
   const capaOverdue = capaRows.filter(
-    (capa) => capa.status !== "Closed" && capa.status !== "Completed" && capa.dueDate && new Date(capa.dueDate) < now
+    (capa) => capa.status !== "Closed" && capa.status !== "Completed" && capa.dueDate && new Date(capa.dueDate) < startOfTodayIST(now)
   ).length;
   const effectivenessFailures = capaRows.filter((capa) => capa.effectiveness === "Not Effective").length;
   const months = lastMonths(12);
@@ -4505,19 +4989,20 @@ async function capaAnalytics(user, companyId, range) {
   const scope = await resolveScope(user, companyId);
   const now = /* @__PURE__ */ new Date();
   const dateFilter = rangeFilter(range);
-  const capas = await Capa.find({ ...scope.filter, ...Object.keys(dateFilter).length ? { createdAt: dateFilter } : {} }).select("number status dueDate completedAt effectiveness owner type evidenceReview createdAt").populate("owner", "name").lean();
+  const capas = await Capa.find({ ...scope.filter, ...Object.keys(dateFilter).length ? { createdAt: dateFilter } : {} }).select("number status dueDate completedAt effectiveness owner ownerEmployee type evidenceReview createdAt").populate("owner", "name").populate("ownerEmployee", "name").lean();
   const closed = capas.filter((capa) => capa.status === "Closed" || capa.status === "Completed");
-  const overdue = capas.filter((capa) => capa.status !== "Closed" && capa.status !== "Completed" && capa.dueDate && new Date(capa.dueDate) < now);
+  const overdue = capas.filter((capa) => capa.status !== "Closed" && capa.status !== "Completed" && capa.dueDate && new Date(capa.dueDate) < startOfTodayIST(now));
   const ownerMap = /* @__PURE__ */ new Map();
   capas.forEach((capa) => {
     const owner = capa.owner;
-    const key = owner?.name || "Unassigned";
+    const ownerEmployee = capa.ownerEmployee;
+    const key = ownerEmployee?.name || owner?.name || "Unassigned";
     const entry = ownerMap.get(key) ?? { owner: key, assigned: 0, open: 0, closed: 0, overdue: 0, effective: 0, notEffective: 0 };
     entry.assigned += 1;
     const isClosed = capa.status === "Closed" || capa.status === "Completed";
     if (isClosed) entry.closed += 1;
     else entry.open += 1;
-    if (!isClosed && capa.dueDate && new Date(capa.dueDate) < now) entry.overdue += 1;
+    if (!isClosed && capa.dueDate && new Date(capa.dueDate) < startOfTodayIST(now)) entry.overdue += 1;
     if (capa.effectiveness === "Effective") entry.effective += 1;
     if (capa.effectiveness === "Not Effective") entry.notEffective += 1;
     ownerMap.set(key, entry);
@@ -4633,7 +5118,7 @@ async function employeesWithoutLogin(user, companyId) {
 }
 
 // server/services/report.service.ts
-import { Types as Types6 } from "mongoose";
+import { Types as Types7 } from "mongoose";
 function date(value) {
   if (!value) return "";
   const parsed = value instanceof Date ? value : new Date(String(value));
@@ -4659,7 +5144,7 @@ async function complaintQuery(context, extra = {}) {
   if (context.from || context.to) {
     filter.receivedAt = { ...context.from ? { $gte: context.from } : {}, ...context.to ? { $lte: context.to } : {} };
   }
-  return Complaint.find(filter).populate("company", "name code").populate("priority", "name").populate("owner", "name").populate("responsibleDept", "name").populate("internalDept", "name").populate("againstDept", "name").sort({ receivedAt: -1 }).lean();
+  return Complaint.find(filter).populate("company", "name code").populate("priority", "name").populate("owner", "name").populate("ownerEmployee", "name").populate("responsibleDept", "name").populate("internalDept", "name").populate("againstDept", "name").sort({ receivedAt: -1 }).lean();
 }
 async function capaQuery(context, extra = {}) {
   const scope = await resolveScope(context.user, context.companyId);
@@ -4667,7 +5152,7 @@ async function capaQuery(context, extra = {}) {
   if (context.from || context.to) {
     filter.dueDate = { ...context.from ? { $gte: context.from } : {}, ...context.to ? { $lte: context.to } : {} };
   }
-  return Capa.find(filter).populate("company", "name code").populate("complaint", "number type customer status").populate("owner", "name").populate("department", "name").populate("priority", "name").sort({ dueDate: 1 }).lean();
+  return Capa.find(filter).populate("company", "name code").populate("complaint", "number type customer status").populate("owner", "name").populate("ownerEmployee", "name").populate("department", "name").populate("priority", "name").sort({ dueDate: 1 }).lean();
 }
 function complaintBaseRow(complaint) {
   return {
@@ -4683,7 +5168,7 @@ function complaintBaseRow(complaint) {
     Project: String(complaint.project ?? ""),
     "Customer PO": String(complaint.customerPO ?? ""),
     Department: name(complaint.responsibleDept),
-    Owner: name(complaint.owner),
+    Owner: name(complaint.ownerEmployee) || name(complaint.owner),
     Status: String(complaint.status ?? ""),
     Repeat: complaint.isRepeat ? "Yes" : "No"
   };
@@ -4790,7 +5275,7 @@ var REPORT_DEFINITIONS = [
         Company: name(capa.company),
         Type: String(capa.type ?? ""),
         Action: String(capa.action ?? ""),
-        Owner: name(capa.owner),
+        Owner: name(capa.ownerEmployee) || name(capa.owner),
         Department: name(capa.department),
         Assigned: date(capa.assignedAt),
         Due: date(capa.dueDate),
@@ -4819,7 +5304,7 @@ var REPORT_DEFINITIONS = [
         Company: name(capa.company),
         Type: String(capa.type ?? ""),
         Action: String(capa.action ?? ""),
-        Owner: name(capa.owner),
+        Owner: name(capa.ownerEmployee) || name(capa.owner),
         Department: name(capa.department),
         Due: date(capa.dueDate),
         Status: String(capa.status ?? ""),
@@ -5018,11 +5503,11 @@ async function buildReport(reportId, context) {
   return definition.build(context);
 }
 async function eightDReportData(complaintId, user) {
-  if (!Types6.ObjectId.isValid(complaintId)) throw httpError(400, "Invalid complaint id");
+  if (!Types7.ObjectId.isValid(complaintId)) throw httpError(400, "Invalid complaint id");
   const scope = await resolveScope(user);
-  const complaint = await Complaint.findOne({ _id: complaintId, ...scope.filter }).populate("company", "name code documentNumber revision effectiveDate logo").populate("priority", "name").populate("owner", "name email").populate("responsibleDept", "name").populate("internalDept", "name").populate("againstDept", "name").lean();
+  const complaint = await Complaint.findOne({ _id: complaintId, ...scope.filter }).populate("company", "name code documentNumber revision effectiveDate logo").populate("priority", "name").populate("owner", "name email").populate("ownerEmployee", "name").populate("responsibleDept", "name").populate("internalDept", "name").populate("againstDept", "name").lean();
   if (!complaint) throw httpError(404, "Complaint not found");
-  const capas = await Capa.find({ complaint: complaintId }).populate("owner", "name").populate("department", "name").sort({ sequence: 1 }).lean();
+  const capas = await Capa.find({ complaint: complaintId }).populate("owner", "name").populate("ownerEmployee", "name").populate("department", "name").sort({ sequence: 1 }).lean();
   return { complaint, capas };
 }
 function eightDExcelSheets(data) {
@@ -5036,7 +5521,7 @@ function eightDExcelSheets(data) {
     { Field: "Customer", Value: String(complaint.customer ?? "") },
     { Field: "Product", Value: String(complaint.product ?? "") },
     { Field: "Category", Value: String(complaint.category ?? "") },
-    { Field: "Owner", Value: name(complaint.owner) },
+    { Field: "Owner", Value: name(complaint.ownerEmployee) || name(complaint.owner) },
     { Field: "Department", Value: name(complaint.responsibleDept) },
     { Field: "Status", Value: String(complaint.status ?? "") },
     { Field: "Description", Value: String(complaint.description ?? "") },
@@ -5076,7 +5561,7 @@ function eightDExcelSheets(data) {
     "CAPA No": String(capa.number ?? ""),
     Type: String(capa.type ?? ""),
     Action: String(capa.action ?? ""),
-    Owner: name(capa.owner),
+    Owner: name(capa.ownerEmployee) || name(capa.owner),
     Department: name(capa.department),
     Due: date(capa.dueDate),
     Completed: date(capa.completedAt),
@@ -5217,215 +5702,10 @@ reportRouter.get(
 // server/routes/attachment.routes.ts
 import { Router as Router2 } from "express";
 import { z as z6 } from "zod";
-
-// server/models/Attachment.ts
-import mongoose17, { Schema as Schema16 } from "mongoose";
-var AttachmentSchema = new Schema16(
-  {
-    publicId: { type: String, required: true, trim: true, index: true },
-    secureUrl: { type: String, required: true, trim: true },
-    resourceType: { type: String, required: true, trim: true, default: "raw" },
-    originalFilename: { type: String, required: true, trim: true },
-    mimeType: { type: String, required: true, trim: true },
-    bytes: { type: Number, required: true },
-    width: Number,
-    height: Number,
-    entityType: { type: String, required: true, trim: true, index: true },
-    entityId: { type: Schema16.Types.ObjectId, required: true, index: true },
-    purpose: { type: String, enum: ATTACHMENT_PURPOSES, required: true, index: true },
-    company: { type: Schema16.Types.ObjectId, ref: "Company", index: true },
-    uploadedBy: { type: Schema16.Types.ObjectId, ref: "User", index: true },
-    uploadedAt: { type: Date, default: Date.now }
-  },
-  { timestamps: true }
-);
-AttachmentSchema.index({ entityType: 1, entityId: 1, purpose: 1 });
-var Attachment = mongoose17.models.Attachment || mongoose17.model("Attachment", AttachmentSchema);
-
-// server/services/attachment.service.ts
-import { v2 as cloudinary } from "cloudinary";
-import { Types as Types7 } from "mongoose";
-
-// server/domain/upload-rules.ts
-var DANGEROUS_EXTENSIONS = [
-  ".exe",
-  ".dll",
-  ".bat",
-  ".cmd",
-  ".com",
-  ".msi",
-  ".scr",
-  ".js",
-  ".mjs",
-  ".vbs",
-  ".ps1",
-  ".sh",
-  ".jar",
-  ".php",
-  ".html",
-  ".htm",
-  ".svg"
-];
-function sanitizeFilename(filename) {
-  const base = filename.split(/[\\/]/).pop() ?? "file";
-  const cleaned = base.replace(/[\u0000-\u001f<>:"|?*]/g, "").replace(/^\.+/, "").trim();
-  return (cleaned || "file").slice(0, 180);
-}
-function validateUpload(file) {
-  const issues = [];
-  const name2 = sanitizeFilename(file.originalname);
-  if (!name2) issues.push({ field: "file", message: "A file name is required" });
-  if (DANGEROUS_EXTENSIONS.some((extension) => name2.toLowerCase().endsWith(extension))) {
-    issues.push({ field: "file", message: "This file type is not allowed" });
-  }
-  if (!ALLOWED_UPLOAD_MIME_TYPES.includes(file.mimetype)) {
-    issues.push({ field: "file", message: `Unsupported file type: ${file.mimetype}` });
-  }
-  if (!file.size || file.size <= 0) {
-    issues.push({ field: "file", message: "The uploaded file is empty" });
-  }
-  if (file.size > MAX_UPLOAD_BYTES) {
-    issues.push({ field: "file", message: `Maximum upload size is ${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MB` });
-  }
-  return issues;
-}
-function buildAttachmentMetadata(result, file) {
-  if (!result.public_id || !result.secure_url) {
-    throw new Error("Cloudinary did not return a usable asset reference");
-  }
-  return {
-    publicId: result.public_id,
-    secureUrl: result.secure_url,
-    resourceType: result.resource_type ?? "raw",
-    originalFilename: sanitizeFilename(file.originalname),
-    mimeType: file.mimetype,
-    bytes: result.bytes ?? file.size,
-    width: result.width,
-    height: result.height
-  };
-}
-
-// server/services/attachment.service.ts
-var SAFE_FOLDER = /^[a-zA-Z0-9_-]{1,64}$/;
-function configuredCloudinary() {
-  const env = getEnv();
-  const missing = ["CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"].filter((key) => !env[key]?.trim());
-  if (missing.length > 0) {
-    throw httpError(503, `Cloudinary is not configured on this environment (empty or missing: ${missing.join(", ")})`);
-  }
-  cloudinary.config({
-    cloud_name: env.CLOUDINARY_CLOUD_NAME,
-    api_key: env.CLOUDINARY_API_KEY,
-    api_secret: env.CLOUDINARY_API_SECRET,
-    secure: true
-  });
-  return { cloudinary, env };
-}
-function folderFor(purpose) {
-  const suffix = purpose.replace(/[^a-zA-Z0-9_-]/g, "-");
-  if (!SAFE_FOLDER.test(suffix)) throw httpError(400, "Invalid upload folder");
-  const env = getEnv();
-  return `${env.CLOUDINARY_UPLOAD_FOLDER || "onepws-complaint-capa"}/${suffix}`;
-}
-function createUploadSignature(purpose) {
-  const { cloudinary: client, env } = configuredCloudinary();
-  const timestamp = Math.round(Date.now() / 1e3);
-  const folder = folderFor(purpose);
-  const signature3 = client.utils.api_sign_request({ timestamp, folder }, env.CLOUDINARY_API_SECRET);
-  return {
-    timestamp,
-    folder,
-    signature: signature3,
-    apiKey: env.CLOUDINARY_API_KEY,
-    cloudName: env.CLOUDINARY_CLOUD_NAME,
-    maxBytes: MAX_UPLOAD_BYTES,
-    allowedMimeTypes: [...ALLOWED_UPLOAD_MIME_TYPES]
-  };
-}
-async function confirmUpload(input, user) {
-  if (!user) throw httpError(401, "Unauthorized");
-  const { cloudinary: client } = configuredCloudinary();
-  const folder = folderFor(input.purpose);
-  if (!input.publicId.startsWith(`${folder}/`)) {
-    throw businessRuleError("This asset does not belong to the declared upload folder", [
-      { field: "publicId", message: "Upload the file with the signature issued for this purpose" }
-    ]);
-  }
-  let resource = null;
-  for (const resourceType of ["image", "video", "raw"]) {
-    try {
-      resource = await client.api.resource(input.publicId, { resource_type: resourceType });
-      break;
-    } catch (error) {
-      const failure = error;
-      const status = failure.http_code ?? failure.error?.http_code;
-      if (status !== void 0 && status !== 404) {
-        const reason = failure.error?.message ?? failure.message ?? "unknown error";
-        throw httpError(502, `Cloudinary rejected the verification request (HTTP ${status}: ${reason})`);
-      }
-    }
-  }
-  if (!resource) throw httpError(404, "The uploaded asset could not be found on Cloudinary");
-  const issues = validateUpload({
-    originalname: input.originalFilename,
-    mimetype: input.mimeType,
-    size: resource.bytes ?? 0
-  });
-  if (issues.length > 0) {
-    await client.uploader.destroy(input.publicId, { resource_type: resource.resource_type ?? "raw" }).catch(() => void 0);
-    throw businessRuleError("This file was rejected", issues);
-  }
-  const metadata = buildAttachmentMetadata(resource, {
-    originalname: input.originalFilename,
-    mimetype: input.mimeType,
-    size: resource.bytes ?? 0
-  });
-  const attachment = await Attachment.create({
-    ...metadata,
-    entityType: input.entityType,
-    entityId: new Types7.ObjectId(input.entityId),
-    purpose: input.purpose,
-    company: input.company ? new Types7.ObjectId(input.company) : void 0,
-    uploadedBy: new Types7.ObjectId(user.id),
-    uploadedAt: /* @__PURE__ */ new Date()
-  });
-  await writeAudit({
-    actor: user,
-    action: "UPLOAD",
-    entity: "Attachment",
-    entityId: String(attachment._id),
-    after: { filename: metadata.originalFilename, bytes: metadata.bytes, purpose: input.purpose }
-  });
-  return attachment;
-}
-async function listAttachments(entityType, entityId) {
-  if (!Types7.ObjectId.isValid(entityId)) throw httpError(400, "Invalid entity id");
-  return Attachment.find({ entityType, entityId }).populate("uploadedBy", "name").sort({ createdAt: -1 }).lean();
-}
-async function deleteAttachment(attachmentId, user, allowed) {
-  if (!user) throw httpError(401, "Unauthorized");
-  if (!allowed) throw httpError(403, "You do not have permission to delete this file");
-  if (!Types7.ObjectId.isValid(attachmentId)) throw httpError(400, "Invalid attachment id");
-  const attachment = await Attachment.findById(attachmentId);
-  if (!attachment) throw httpError(404, "Attachment not found");
-  const { cloudinary: client } = configuredCloudinary();
-  await client.uploader.destroy(attachment.publicId, { resource_type: attachment.resourceType }).catch(() => void 0);
-  await Attachment.deleteOne({ _id: attachment._id });
-  await writeAudit({
-    actor: user,
-    action: "DELETE_ATTACHMENT",
-    entity: "Attachment",
-    entityId: attachmentId,
-    before: { filename: attachment.originalFilename, publicId: attachment.publicId }
-  });
-  return { deleted: true, filename: sanitizeFilename(attachment.originalFilename) };
-}
-
-// server/routes/attachment.routes.ts
 var attachmentRouter = Router2();
 attachmentRouter.use(requireUser);
 var ENTITY_PURPOSES = {
-  Complaint: ["complaint.attachment", "d6.document"],
+  Complaint: ["complaint.attachment", "complaint.photo", "d6.document"],
   Capa: ["capa.evidence", "capa.effectiveness"],
   Company: ["company.logo"]
 };
@@ -5440,7 +5720,7 @@ attachmentRouter.post(
   asyncHandler(async (req, res) => {
     const input = z6.object({ purpose: z6.enum(ATTACHMENT_PURPOSES) }).parse(req.body);
     const actor = await requireActor(req.user);
-    const allowed = isMasterAdmin(actor) || input.purpose === "company.logo" && isMasterAdmin(actor) || (input.purpose === "capa.evidence" || input.purpose === "capa.effectiveness") && (hasPermission(actor, "capa.edit.own") || hasPermission(actor, "complaint.assign") || hasPermission(actor, "capa.verify")) || (input.purpose === "complaint.attachment" || input.purpose === "d6.document") && (hasPermission(actor, "complaint.create") || hasPermission(actor, "complaint.edit") || hasPermission(actor, "complaint.edit.own") || hasPermission(actor, "complaint.edit.dept") || hasPermission(actor, "complaint.assign"));
+    const allowed = isMasterAdmin(actor) || input.purpose === "company.logo" && isMasterAdmin(actor) || (input.purpose === "capa.evidence" || input.purpose === "capa.effectiveness") && (hasPermission(actor, "capa.edit.own") || hasPermission(actor, "complaint.assign") || hasPermission(actor, "capa.verify")) || (input.purpose === "complaint.attachment" || input.purpose === "complaint.photo" || input.purpose === "d6.document") && (hasPermission(actor, "complaint.create") || hasPermission(actor, "complaint.edit") || hasPermission(actor, "complaint.edit.own") || hasPermission(actor, "complaint.edit.dept") || hasPermission(actor, "complaint.assign"));
     if (!allowed) throw httpError(403, "You do not have permission to upload files for this purpose");
     return ok(res, createUploadSignature(input.purpose));
   })
@@ -5475,7 +5755,14 @@ attachmentRouter.post(
       const company = await Company.findById(input.entityId).select("_id").lean();
       if (!company) throw httpError(404, "Company not found");
     }
+    if (input.purpose === "complaint.photo" && !input.mimeType.startsWith("image/")) {
+      throw httpError(400, "The complaint photo must be an image (JPG, PNG, WebP or similar)");
+    }
     const attachment = await confirmUpload(input, req.user);
+    if (input.purpose === "complaint.photo") {
+      const previous = await Attachment.find({ entityType: "Complaint", entityId: input.entityId, purpose: "complaint.photo", _id: { $ne: attachment._id } }).select("_id").lean();
+      for (const old of previous) await deleteAttachment(String(old._id), req.user, true);
+    }
     return ok(res, { attachment }, 201);
   })
 );
@@ -5751,17 +6038,22 @@ import { z as z9 } from "zod";
 
 // shared/schemas/capa.ts
 import { z as z8 } from "zod";
-var capaCreateSchema = z8.object({
+var capaBaseSchema = z8.object({
   type: z8.enum(CAPA_TYPES).default("Corrective"),
   action: z8.string().trim().min(5, "Describe the action in at least 5 characters").max(4e3),
-  owner: objectIdSchema,
+  owner: objectIdSchema.optional(),
+  ownerEmployee: objectIdSchema.optional(),
   department: objectIdSchema.optional(),
   priority: objectIdSchema.optional(),
   dueDate: z8.coerce.date(),
   status: z8.enum(CAPA_STATUSES).default("Open"),
   evidence: z8.string().trim().max(4e3).optional().default("")
 });
-var capaUpdateSchema = capaCreateSchema.partial().extend({
+var capaCreateSchema = capaBaseSchema.refine((value) => Boolean(value.owner || value.ownerEmployee), {
+  message: "Select an owner",
+  path: ["owner"]
+});
+var capaUpdateSchema = capaBaseSchema.partial().extend({
   completedAt: z8.coerce.date().optional(),
   delayReason: z8.string().trim().max(200).optional()
 });
@@ -5886,7 +6178,7 @@ async function listCapas(query, user) {
   if (query.effectiveness) filter.effectiveness = query.effectiveness;
   if (query.evidenceReview) filter["evidenceReview.status"] = query.evidenceReview;
   if (query.overdue) {
-    filter.dueDate = { $lt: /* @__PURE__ */ new Date() };
+    filter.dueDate = { $lt: startOfTodayIST() };
     filter.status = { $nin: ["Closed", "Completed"] };
   }
   if (query.dueFrom || query.dueTo) {
@@ -5905,16 +6197,25 @@ async function listCapas(query, user) {
   const sortField = query.sort && /^[a-zA-Z]+$/.test(query.sort) ? query.sort : "dueDate";
   const sort = { [sortField]: query.order === "asc" ? 1 : -1 };
   const [rows, total] = await Promise.all([
-    Capa.find(filter).sort(sort).skip((query.page - 1) * query.pageSize).limit(query.pageSize).populate("owner", "name username").populate("complaint", "number type status").populate("company", "name code").populate("department", "name").lean(),
+    Capa.find(filter).sort(sort).skip((query.page - 1) * query.pageSize).limit(query.pageSize).populate("owner", "name username").populate("ownerEmployee", "name").populate("complaint", "number type status").populate("company", "name code").populate("department", "name").lean(),
     Capa.countDocuments(filter)
   ]);
   return { rows, total };
+}
+async function resolveCapaOwner(input, companyId, actorId) {
+  if (input.owner) return { owner: input.owner, ownerEmployee: void 0 };
+  if (!input.ownerEmployee) return null;
+  const employee = await Employee.findOne({ _id: input.ownerEmployee, company: companyId, active: true }).select("_id").lean();
+  if (!employee) throw httpError(400, "The selected employee is not active in this company");
+  return { owner: actorId, ownerEmployee: employee._id };
 }
 async function createCapa(complaintId, input, user) {
   const context = await loadComplaintContext(complaintId, user);
   if (!hasPermission(context.actor, "complaint.assign") && !hasPermission(context.actor, "capa.edit.own") && !hasPermission(context.actor, "complaint.edit") && !isMasterAdmin(context.actor)) {
     throw httpError(403, "You do not have permission to add CAPAs");
   }
+  const resolvedOwner = await resolveCapaOwner(input, context.doc.company, user?.id);
+  if (!resolvedOwner) throw httpError(400, "Select an owner");
   const sequence = await Capa.countDocuments({ complaint: context.doc._id }) + 1;
   const number = await nextCapaNumber(context.doc.company, context.doc.number, sequence);
   const capa = await Capa.create({
@@ -5924,7 +6225,8 @@ async function createCapa(complaintId, input, user) {
     sequence,
     type: input.type,
     action: input.action,
-    owner: input.owner,
+    owner: resolvedOwner.owner,
+    ownerEmployee: resolvedOwner.ownerEmployee,
     department: input.department ?? context.doc.responsibleDept,
     priority: input.priority ?? context.doc.priority,
     dueDate: input.dueDate,
@@ -5939,7 +6241,8 @@ async function createCapa(complaintId, input, user) {
     after: { number: capa.number, owner: String(capa.owner), dueDate: capa.dueDate }
   });
   await notify({
-    recipients: [capa.owner].filter(Boolean),
+    // An employee owner has no portal login; they are reached by email below.
+    recipients: (capa.ownerEmployee ? [] : [capa.owner]).filter(Boolean),
     message: `CAPA ${capa.number} assigned to you (due ${new Date(capa.dueDate).toISOString().slice(0, 10)})`,
     category: "capa",
     entityType: "Capa",
@@ -5979,11 +6282,12 @@ async function updateCapa(capaId, input, user) {
     const issues = validateCapaStatusChange(toDomainCapa(capa), input.status, input.evidence);
     if (issues.length > 0) throw businessRuleError("This CAPA status change is not allowed", issues);
   }
-  const before = { status: capa.status, owner: String(capa.owner), dueDate: capa.dueDate };
+  const before = { status: capa.status, owner: String(capa.owner), ownerEmployee: capa.ownerEmployee ? String(capa.ownerEmployee) : null, dueDate: capa.dueDate };
+  const resolvedOwner = await resolveCapaOwner(input, capa.company, capa.owner ? String(capa.owner) : user?.id);
   capa.set({
     ...input.type ? { type: input.type } : {},
     ...input.action ? { action: input.action } : {},
-    ...input.owner ? { owner: input.owner } : {},
+    ...resolvedOwner ? { owner: resolvedOwner.owner, ownerEmployee: resolvedOwner.ownerEmployee ?? null } : {},
     ...input.department ? { department: input.department } : {},
     ...input.priority ? { priority: input.priority } : {},
     ...input.dueDate ? { dueDate: input.dueDate } : {},
@@ -6270,6 +6574,7 @@ import { z as z11 } from "zod";
 // shared/schemas/complaint.ts
 import { z as z10 } from "zod";
 var optionalText = (max) => z10.string().trim().max(max).optional().default("");
+var relatedEmailsSchema = z10.array(z10.string().trim().email("Enter a valid related person email address").transform((email) => email.toLowerCase())).max(30, "A complaint can have at most 30 related email addresses").transform((emails) => Array.from(new Set(emails)));
 var baseComplaintSchema = z10.object({
   type: z10.enum(COMPLAINT_TYPES),
   company: objectIdSchema,
@@ -6292,6 +6597,7 @@ var baseComplaintSchema = z10.object({
   description: z10.string().trim().min(10, "Describe the complaint in at least 10 characters").max(5e3),
   owner: objectIdSchema.optional(),
   ownerEmployee: objectIdSchema.optional(),
+  relatedEmails: relatedEmailsSchema.default([]),
   attachments: z10.array(objectIdSchema).max(20).default([])
 });
 var complaintCreateSchema = baseComplaintSchema.superRefine((value, ctx) => {
@@ -6328,6 +6634,7 @@ var complaintListQuerySchema = listQuerySchema.extend({
   category: z10.string().trim().max(120).optional(),
   responsibleDept: objectIdSchema.optional(),
   owner: objectIdSchema.optional(),
+  ownerEmployee: objectIdSchema.optional(),
   isRepeat: z10.coerce.boolean().optional(),
   tat: z10.enum(["on-time", "due-soon", "overdue"]).optional(),
   receivedFrom: z10.coerce.date().optional(),
@@ -6348,7 +6655,7 @@ var stageCompleteSchema = z10.object({
 });
 var actionRowSchema = z10.object({
   action: z10.string().trim().max(2e3).optional().default(""),
-  resp: z10.string().trim().max(160).optional().default(""),
+  resp: z10.string().trim().max(1e3).optional().default(""),
   target: z10.string().trim().max(40).optional().default(""),
   status: z10.string().trim().max(40).optional().default("Open"),
   remarks: z10.string().trim().max(2e3).optional().default(""),
@@ -6362,6 +6669,7 @@ var fishboneSchema = z10.object(
   }, {})
 );
 var eightDSchema = z10.object({
+  relatedEmails: relatedEmailsSchema.optional(),
   d0: z10.string().trim().max(4e3).optional(),
   d1Team: z10.array(
     z10.object({
@@ -6425,6 +6733,7 @@ var eightDSchema = z10.object({
   d8ClosedDate: z10.string().trim().max(40).optional()
 });
 var internalInvestigationSchema = z10.object({
+  relatedEmails: relatedEmailsSchema.optional(),
   /** Immediate response and interim containment: required to acknowledge and to complete containment. */
   d0: z10.string().trim().max(4e3).optional(),
   d3Actions: z10.array(actionRowSchema).max(50).optional(),
@@ -6442,7 +6751,9 @@ var internalInvestigationSchema = z10.object({
 var closeComplaintSchema = z10.object({
   closureRemarks: z10.string().trim().min(5, "Closure remarks are required").max(4e3),
   noRepeatConfirmed: z10.boolean().default(false),
-  force: z10.boolean().default(false)
+  force: z10.boolean().default(false),
+  /** Master Admin only: close the complaint even when mandatory items are missing or CAPAs are open. */
+  forceCloseAll: z10.boolean().default(false)
 });
 var reopenComplaintSchema = z10.object({
   reason: z10.string().trim().min(5, "A reopen reason is required").max(2e3)
@@ -6469,23 +6780,6 @@ var overallEffectivenessSchema = z10.object({
   at: z10.coerce.date().optional(),
   comments: z10.string().trim().max(4e3).optional().default("")
 });
-
-// server/models/ComplaintNote.ts
-import mongoose18, { Schema as Schema17 } from "mongoose";
-var ComplaintNoteSchema = new Schema17(
-  {
-    complaint: { type: Schema17.Types.ObjectId, ref: "Complaint", required: true, index: true },
-    company: { type: Schema17.Types.ObjectId, ref: "Company", required: true, index: true },
-    kind: { type: String, enum: NOTE_KINDS, default: "Note", index: true },
-    referenceDate: { type: Date, default: null },
-    content: { type: String, required: true, trim: true },
-    createdBy: { type: Schema17.Types.ObjectId, ref: "User", index: true },
-    createdByName: { type: String, trim: true }
-  },
-  { timestamps: true }
-);
-ComplaintNoteSchema.index({ complaint: 1, createdAt: -1 });
-var ComplaintNote = mongoose18.models.ComplaintNote || mongoose18.model("ComplaintNote", ComplaintNoteSchema);
 
 // server/routes/complaint.routes.ts
 var complaintRouter = Router6();
@@ -6721,7 +7015,11 @@ var escalationConfigSchema = z12.object({
     })
   ).min(1).max(10),
   reminderPercentages: z12.array(z12.number().int().min(1).max(100)).min(1).max(10),
-  active: z12.boolean().default(true)
+  active: z12.boolean().default(true),
+  /** Master switch for the scheduled (automatic) reminder and escalation emails. */
+  autoEmailEnabled: z12.boolean().default(true),
+  /** Repeat interval, in days, between automatic sends. 7 = weekly (Monday morning). */
+  frequencyDays: z12.number().int().min(1).max(90).default(7)
 });
 var numberingConfigSchema = z12.object({
   company: objectIdSchema,
@@ -6765,14 +7063,15 @@ configurationRouter.get(
   asyncHandler(async (req, res) => {
     await connectDB();
     const company = typeof req.query.company === "string" && req.query.company ? req.query.company : null;
+    const basic = req.query.view === "basic";
     const [tat, escalation, delayReasonItems, categories, priorities, rootCauseCategories, numbering] = await Promise.all([
-      resolveTatConfig(company),
-      resolveEscalation(company),
-      DelayReason.find({ active: true }).sort({ order: 1, name: 1 }).lean(),
+      basic ? Promise.resolve({}) : resolveTatConfig(company),
+      basic ? Promise.resolve({ levels: [], reminderPercentages: [] }) : resolveEscalation(company),
+      basic ? Promise.resolve([]) : DelayReason.find({ active: true }).sort({ order: 1, name: 1 }).lean(),
       Category.find({ active: true }).sort({ complaintType: 1, order: 1, name: 1 }).lean(),
       Priority.find({ active: true }).sort({ order: 1 }).lean(),
-      RootCauseCategory.find({ active: true }).sort({ order: 1, name: 1 }).lean(),
-      company ? NumberingConfiguration.findOne({ company, active: true }).lean() : Promise.resolve(null)
+      basic ? Promise.resolve([]) : RootCauseCategory.find({ active: true }).sort({ order: 1, name: 1 }).lean(),
+      !basic && company ? NumberingConfiguration.findOne({ company, active: true }).lean() : Promise.resolve(null)
     ]);
     return ok(res, {
       tat,
@@ -6965,7 +7264,7 @@ configurationRouter.delete(
 
 // server/routes/health.routes.ts
 import { Router as Router8 } from "express";
-import mongoose19 from "mongoose";
+import mongoose20 from "mongoose";
 var healthRouter = Router8();
 healthRouter.get(
   "/",
@@ -6979,7 +7278,7 @@ healthRouter.get(
   "/db",
   asyncHandler(async (_req, res) => {
     await connectDB();
-    return ok(res, { status: mongoose19.connection.readyState === 1 ? "connected" : "not-connected" });
+    return ok(res, { status: mongoose20.connection.readyState === 1 ? "connected" : "not-connected" });
   })
 );
 
@@ -7569,6 +7868,7 @@ var systemBackupSchema = z14.object({
     escalationConfigurations: z14.array(recordSchema),
     numberingConfigurations: z14.array(recordSchema),
     emailTemplates: z14.array(recordSchema),
+    emailRouting: z14.array(recordSchema).default([]),
     complaints: z14.array(recordSchema),
     capas: z14.array(recordSchema),
     attachments: z14.array(recordSchema)
@@ -7586,6 +7886,7 @@ var COLLECTION_KEYS = [
   "escalationConfigurations",
   "numberingConfigurations",
   "emailTemplates",
+  "emailRouting",
   "complaints",
   "capas",
   "attachments"
@@ -7625,6 +7926,7 @@ async function exportSystemBackup(user) {
     escalationConfigurations,
     numberingConfigurations,
     emailTemplates,
+    emailRouting,
     complaints,
     capas,
     attachments
@@ -7640,6 +7942,7 @@ async function exportSystemBackup(user) {
     EscalationConfiguration.find().lean(),
     NumberingConfiguration.find().lean(),
     EmailTemplate.find().select("-createdBy -updatedBy").lean(),
+    EmailRouting.find().select("-updatedBy").lean(),
     Complaint.find().lean(),
     Capa.find().lean(),
     Attachment.find().lean()
@@ -7660,6 +7963,7 @@ async function exportSystemBackup(user) {
       escalationConfigurations,
       numberingConfigurations,
       emailTemplates,
+      emailRouting,
       complaints,
       capas,
       attachments
@@ -7754,6 +8058,11 @@ async function restoreEmailTemplate(record, dryRun) {
   if (!dryRun) await EmailTemplate.create(safeRecord(record));
   return "inserted";
 }
+async function restoreEmailRouting(record, dryRun) {
+  if (await EmailRouting.exists({ key: "global" })) return "existing";
+  if (!dryRun) await EmailRouting.create(safeRecord(record));
+  return "inserted";
+}
 async function restoreComplaint(record, dryRun) {
   const id2 = idOf(record);
   const number = stringField(record, "number");
@@ -7804,6 +8113,8 @@ async function restoreOne(key, record, dryRun) {
       return restoreConfiguration(key, record, dryRun);
     case "emailTemplates":
       return restoreEmailTemplate(record, dryRun);
+    case "emailRouting":
+      return restoreEmailRouting(record, dryRun);
     case "complaints":
       return restoreComplaint(record, dryRun);
     case "capas":
@@ -8148,10 +8459,11 @@ masterAdminRouter.delete(
 
 // server/routes/master.routes.ts
 import { Router as Router11 } from "express";
+import { z as z17 } from "zod";
 
 // server/models/Permission.ts
-import mongoose20, { Schema as Schema18 } from "mongoose";
-var PermissionSchema = new Schema18(
+import mongoose21, { Schema as Schema19 } from "mongoose";
+var PermissionSchema = new Schema19(
   {
     key: { type: String, required: true, unique: true, trim: true, index: true },
     label: { type: String, required: true, trim: true },
@@ -8160,7 +8472,7 @@ var PermissionSchema = new Schema18(
   },
   { timestamps: true }
 );
-var Permission = mongoose20.models.Permission || mongoose20.model("Permission", PermissionSchema);
+var Permission = mongoose21.models.Permission || mongoose21.model("Permission", PermissionSchema);
 
 // server/routes/master.routes.ts
 var masterRouter = Router11();
@@ -8168,14 +8480,17 @@ masterRouter.use(requireUser);
 masterRouter.get(
   "/bootstrap",
   requirePermission("view.company"),
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
     await connectDB();
+    const options = z17.object({ include: z17.enum(["reference", "employees", "full"]).default("reference") }).parse(req.query);
+    const includeEmployees = options.include === "employees" || options.include === "full";
+    const includeAdminData = options.include === "full";
     const [companies, departments, roles, permissions, employees] = await Promise.all([
-      Company.find().sort({ name: 1 }).lean(),
-      Department.find().sort({ name: 1 }).lean(),
-      Role.find().sort({ name: 1 }).lean(),
-      Permission.find().sort({ key: 1 }).lean(),
-      Employee.find().sort({ name: 1 }).limit(500).lean()
+      Company.find().select("name code complaintNumberingPrefix active").sort({ name: 1 }).lean(),
+      Department.find().select("name code company managementEmails active").sort({ name: 1 }).lean(),
+      includeAdminData ? Role.find().sort({ name: 1 }).lean() : Promise.resolve([]),
+      includeAdminData ? Permission.find().sort({ key: 1 }).lean() : Promise.resolve([]),
+      includeEmployees ? Employee.find().select("name employeeCode designation email department company managerName managerEmail hodName hodEmail linkedUser active").sort({ name: 1 }).limit(500).lean() : Promise.resolve([])
     ]);
     return ok(res, { companies, departments, roles, permissions, employees });
   })
@@ -8295,16 +8610,16 @@ masterRouter.post(
 
 // server/routes/notification.routes.ts
 import { Router as Router12 } from "express";
-import { z as z17 } from "zod";
+import { z as z18 } from "zod";
 var notificationRouter = Router12();
 notificationRouter.use(requireUser);
 notificationRouter.get(
   "/",
   asyncHandler(async (req, res) => {
-    const query = z17.object({
-      unreadOnly: z17.coerce.boolean().default(false),
-      page: z17.coerce.number().int().min(1).default(1),
-      pageSize: z17.coerce.number().int().min(1).max(100).default(25)
+    const query = z18.object({
+      unreadOnly: z18.coerce.boolean().default(false),
+      page: z18.coerce.number().int().min(1).default(1),
+      pageSize: z18.coerce.number().int().min(1).max(100).default(25)
     }).parse(req.query);
     await connectDB();
     const result = await listNotifications(req.user.id, {
@@ -8343,55 +8658,65 @@ notificationRouter.post(
 import { Router as Router13 } from "express";
 
 // shared/schemas/email.ts
-import { z as z18 } from "zod";
-var emailTemplateSchema = z18.object({
-  templateKey: z18.string().min(2).max(100).regex(/^[a-z0-9-]+$/, "Template key must contain only lowercase letters, numbers, and hyphens"),
-  templateName: z18.string().min(2).max(120),
-  triggerEvent: z18.enum(EMAIL_TRIGGER_EVENTS),
-  subject: z18.string().min(1).max(250),
-  htmlBody: z18.string().min(1),
-  textBody: z18.string().min(1),
-  supportedVariables: z18.array(z18.string()).default([]),
-  isActive: z18.boolean().default(true),
-  allowedRolesToReceive: z18.array(z18.string()).default([]),
-  ccRules: z18.array(z18.string()).default([]),
-  bccRules: z18.array(z18.string()).default([])
+import { z as z19 } from "zod";
+var emailListSchema2 = z19.array(z19.string().trim().toLowerCase().email("Enter valid email addresses")).max(50).default([]);
+var emailTemplateSchema = z19.object({
+  templateKey: z19.string().min(2).max(100).regex(/^[a-z0-9-]+$/, "Template key must contain only lowercase letters, numbers, and hyphens"),
+  templateName: z19.string().min(2).max(120),
+  triggerEvent: z19.enum(EMAIL_TRIGGER_EVENTS),
+  subject: z19.string().min(1).max(250),
+  htmlBody: z19.string().min(1),
+  textBody: z19.string().min(1),
+  supportedVariables: z19.array(z19.string()).default([]),
+  isActive: z19.boolean().default(true),
+  allowedRolesToReceive: z19.array(z19.string()).default([]),
+  /** Extra fixed To addresses for this email. */
+  toEmails: emailListSchema2,
+  /** Extra fixed CC addresses for this email. */
+  ccRules: emailListSchema2,
+  bccRules: emailListSchema2,
+  /** Addresses removed from this email wherever they would otherwise come from. */
+  excludeEmails: emailListSchema2
+});
+var emailRoutingSchema = z19.object({
+  commonCc: emailListSchema2,
+  excludeEmails: emailListSchema2
 });
 var emailTemplateUpdateSchema = emailTemplateSchema.partial().omit({ templateKey: true });
-var sendTestEmailSchema = z18.object({
-  to: z18.string().email("Please provide a valid recipient email address"),
-  subject: z18.string().optional(),
-  message: z18.string().optional()
+var sendTestEmailSchema = z19.object({
+  to: z19.string().email("Please provide a valid recipient email address"),
+  subject: z19.string().optional(),
+  message: z19.string().optional()
 });
-var templateTestSendSchema = z18.object({
-  to: z18.string().email("Please provide a valid recipient email address"),
-  sampleData: z18.record(z18.union([z18.string(), z18.number()])).optional()
+var templateTestSendSchema = z19.object({
+  to: z19.string().email("Please provide a valid recipient email address"),
+  sampleData: z19.record(z19.union([z19.string(), z19.number()])).optional()
 });
-var templatePreviewSchema = z18.object({
-  htmlBody: z18.string().optional(),
-  textBody: z18.string().optional(),
-  subject: z18.string().optional(),
-  sampleData: z18.record(z18.union([z18.string(), z18.number()])).optional()
+var templatePreviewSchema = z19.object({
+  htmlBody: z19.string().optional(),
+  textBody: z19.string().optional(),
+  subject: z19.string().optional(),
+  sampleData: z19.record(z19.union([z19.string(), z19.number()])).optional()
 });
-var emailLogQuerySchema = z18.object({
-  page: z18.coerce.number().min(1).default(1),
-  pageSize: z18.coerce.number().min(1).max(100).default(20),
-  status: z18.enum(["sent", "failed", "skipped", "all"]).optional().default("all"),
-  triggerEvent: z18.string().optional(),
-  templateKey: z18.string().optional(),
-  recipient: z18.string().optional(),
-  search: z18.string().optional(),
-  startDate: z18.string().optional(),
-  endDate: z18.string().optional()
+var emailLogQuerySchema = z19.object({
+  page: z19.coerce.number().min(1).default(1),
+  pageSize: z19.coerce.number().min(1).max(100).default(20),
+  status: z19.enum(["sent", "failed", "skipped", "all"]).optional().default("all"),
+  triggerEvent: z19.string().optional(),
+  templateKey: z19.string().optional(),
+  recipient: z19.string().optional(),
+  search: z19.string().optional(),
+  startDate: z19.string().optional(),
+  endDate: z19.string().optional()
 });
-var retryEmailSchema = z18.object({
-  logId: z18.string().min(1, "Log ID is required")
+var retryEmailSchema = z19.object({
+  logId: z19.string().min(1, "Log ID is required")
 });
-var shareReportSchema = z18.object({
-  complaintId: z18.string().min(1, "Complaint ID is required"),
-  recipientEmail: z18.string().email("Valid recipient email is required"),
-  recipientName: z18.string().min(1, "Recipient name is required"),
-  notes: z18.string().optional()
+var shareReportSchema = z19.object({
+  complaintId: z19.string().min(1, "Complaint ID is required"),
+  recipientEmail: z19.string().email("Valid recipient email is required"),
+  recipientName: z19.string().min(1, "Recipient name is required"),
+  notes: z19.string().optional()
 });
 
 // server/domain/tat-delay.ts
@@ -8399,22 +8724,19 @@ var HOUR_MS2 = 60 * 60 * 1e3;
 function stageDelays(dues, completed, now) {
   return WORKFLOW_STAGES.map((stage) => {
     const completedAt = completed[stage] ? new Date(completed[stage]) : null;
-    const lateMs = now.getTime() - dues[stage].getTime();
+    const lateMs = now.getTime() - endOfDueDay(dues[stage]).getTime();
     const delayed = !completedAt && lateMs > 0;
     return { stage, completedAt, dueAt: dues[stage], overdueHours: delayed ? Math.floor(lateMs / HOUR_MS2) : 0, delayed };
   });
 }
-function needsManagementEscalation(maxOverdueHours) {
-  return maxOverdueHours > MANAGEMENT_ESCALATION_DAYS * 24;
-}
-var dateText = (date2) => date2.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+var dateText2 = (date2) => date2.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 function lateText(hours) {
   const days = Math.floor(hours / 24);
   return days < 1 ? "less than a day" : `${days} day${days === 1 ? "" : "s"}`;
 }
 function stageStatusText(entry) {
-  if (entry.completedAt) return `Completed on ${dateText(entry.completedAt)}`;
-  return entry.delayed ? `DELAYED by ${lateText(entry.overdueHours)} (was due ${dateText(entry.dueAt)})` : `Due ${dateText(entry.dueAt)}`;
+  if (entry.completedAt) return `Completed on ${dateText2(entry.completedAt)}`;
+  return entry.delayed ? `DELAYED by ${lateText(entry.overdueHours)} (was due ${dateText2(entry.dueAt)})` : `Due ${dateText2(entry.dueAt)}`;
 }
 
 // server/services/escalation.service.ts
@@ -8423,6 +8745,7 @@ async function processEscalations() {
   await connectDB();
   let complaintsEscalated = 0;
   let capasEscalated = 0;
+  const { commonCc } = await getEmailRouting();
   const now = /* @__PURE__ */ new Date();
   const todayStr = now.toISOString().slice(0, 10);
   const tatConfigDoc = await TATConfiguration.findOne({ company: null }).lean();
@@ -8451,7 +8774,6 @@ async function processEscalations() {
     const delayed = delays.filter((entry) => entry.delayed);
     if (delayed.length === 0) continue;
     const maxOverdueHours = Math.max(...delayed.map((entry) => entry.overdueHours));
-    const includeManagement = needsManagementEscalation(maxOverdueHours);
     const ownerEmployee = complaint.ownerEmployee;
     let to = await resolveRecipients({
       complaintId: complaint._id,
@@ -8464,25 +8786,23 @@ async function processEscalations() {
         to = to.concat(await resolveRecipients({ capaId: capa._id, targetRoles: ["CAPA Owner"] }));
       }
     }
-    let cc = [...COMMON_CC_EMAILS];
-    if (includeManagement) {
-      cc = cc.concat(await resolveRecipients({ complaintId: complaint._id, targetRoles: ["Management"] }));
-    }
+    let cc = [...commonCc];
     to = unique(to);
     if (to.length === 0) {
-      to = [...COMMON_CC_EMAILS];
-      cc = cc.filter((email) => !COMMON_CC_EMAILS.includes(email));
+      to = [...commonCc];
+      cc = cc.filter((email) => !commonCc.includes(email));
     }
     const status = Object.fromEntries(delays.map((entry) => [entry.stage, stageStatusText(entry)]));
     const res = await sendTemplatedEmail({
       triggerEvent: "TAT_DELAY_DAILY",
       recipients: to,
       cc: unique(cc),
-      excludeManagement: !includeManagement,
+      excludeManagement: true,
       dedupeKey: `TATDELAY_${complaint._id}_${todayStr}`,
       relatedComplaintId: complaint._id,
+      automated: { daysDelayed: Math.floor(maxOverdueHours / 24) },
       data: {
-        statusLabel: includeManagement ? "ESCALATED" : "Delayed",
+        statusLabel: "Delayed",
         complaintNumber: complaint.number,
         delayedCount: String(delayed.length),
         maxDaysLate: lateText(maxOverdueHours),
@@ -8494,7 +8814,7 @@ async function processEscalations() {
         departmentName: complaint.responsibleDept?.name || "General",
         ownerName: ownerEmployee?.name || complaint.owner?.name || "Assigned Owner",
         priority: complaint.priority?.name || "Standard",
-        escalationNote: includeManagement ? `Management has been copied because a stage is more than ${MANAGEMENT_ESCALATION_DAYS} days late.` : `Management is copied only when a stage is more than ${MANAGEMENT_ESCALATION_DAYS} days late.`,
+        escalationNote: "Management receives only the monthly summary report.",
         actionUrl: `/complaints/${complaint._id}`
       }
     });
@@ -8502,29 +8822,27 @@ async function processEscalations() {
   }
   const overdueCapas = await Capa.find({
     status: { $nin: ["Closed", "Completed", "Under Verification"] },
-    dueDate: { $lt: now }
-  }).populate("owner", "name email").populate("complaint", "number").lean();
+    dueDate: { $lt: startOfTodayIST(now) }
+  }).populate("owner", "name email").populate("ownerEmployee", "name email").populate("complaint", "number").lean();
   for (const capa of overdueCapas) {
     if (!capa.dueDate) continue;
     const targetDate = new Date(capa.dueDate);
     const dedupeKey = `ESCALATION_CAPA_${capa._id}_${todayStr}`;
-    const includeManagement = needsManagementEscalation(Math.floor((now.getTime() - targetDate.getTime()) / 36e5));
     const recipients = await resolveRecipients({
       capaId: capa._id,
       targetRoles: ["CAPA Owner", "Department Head"]
     });
-    const cc = includeManagement ? await resolveRecipients({ capaId: capa._id, targetRoles: ["Management"] }) : [];
     if (recipients.length > 0) {
       const res = await sendTemplatedEmail({
         triggerEvent: "CAPA_OVERDUE",
         recipients,
-        cc,
-        excludeManagement: !includeManagement,
+        excludeManagement: true,
         dedupeKey,
         relatedCapaId: capa._id,
+        automated: { daysDelayed: Math.floor((now.getTime() - targetDate.getTime()) / 864e5) },
         data: {
           capaNumber: capa.number,
-          assignedTo: capa.owner?.name || "CAPA Owner",
+          assignedTo: capa.ownerEmployee?.name || capa.owner?.name || "CAPA Owner",
           targetDate: targetDate.toLocaleDateString("en-IN"),
           complaintNumber: capa.complaint?.number || "N/A",
           actionUrl: `/capa/tracker`
@@ -8555,6 +8873,23 @@ emailRouter.get(
   asyncHandler(async (req, res) => {
     assertMasterAdmin(req);
     return ok(res, getSmtpStatus());
+  })
+);
+emailRouter.get(
+  "/routing",
+  requireUser,
+  asyncHandler(async (req, res) => {
+    assertMasterAdmin(req);
+    return ok(res, await getEmailRouting());
+  })
+);
+emailRouter.put(
+  "/routing",
+  requireUser,
+  asyncHandler(async (req, res) => {
+    assertMasterAdmin(req);
+    const input = emailRoutingSchema.parse(req.body);
+    return ok(res, await updateEmailRouting(input, req.user));
   })
 );
 emailRouter.post(
@@ -8709,6 +9044,7 @@ emailRouter.post(
 import { Router as Router14 } from "express";
 
 // server/lib/cron-auth.ts
+import { timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 function requireCronAuth(req, _res, next) {
   const secret = getEnv().CRON_SECRET;
   if (!secret) {
@@ -8718,10 +9054,35 @@ function requireCronAuth(req, _res, next) {
   const headerSecret = req.headers["x-cron-secret"];
   const bearerSecret = authHeader?.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
   const provided = (typeof headerSecret === "string" ? headerSecret.trim() : null) || bearerSecret;
-  if (!provided || provided !== secret) {
+  const matches = provided !== null && provided.length === secret.length && timingSafeEqual2(Buffer.from(provided), Buffer.from(secret));
+  if (!matches) {
     throw httpError(401, "Unauthorized cron execution");
   }
   next();
+}
+
+// server/domain/email-schedule.ts
+var IST_OFFSET_MS2 = 5.5 * 36e5;
+var DAY_MS4 = 864e5;
+var istDayNumber = (date2) => Math.floor((date2.getTime() + IST_OFFSET_MS2) / DAY_MS4);
+var istWeekday = (date2) => new Date(date2.getTime() + IST_OFFSET_MS2).getUTCDay();
+var isSunday = (date2) => istWeekday(date2) === 0;
+var reminderLookaheadDays = (now) => istWeekday(now) === 6 ? 2 : 1;
+function shouldRunScheduledEmails(input) {
+  const now = input.now ?? /* @__PURE__ */ new Date();
+  if (!input.enabled) return { run: false, reason: "Automatic emails are switched off" };
+  if (isSunday(now)) return { run: false, reason: "No automatic emails on Sunday; sent from Monday morning" };
+  const frequency = Math.max(1, Math.floor(input.frequencyDays || 7));
+  if (!input.lastRunAt) {
+    if (frequency >= 7 && istWeekday(now) !== 1) return { run: false, reason: "Waiting for Monday" };
+    return { run: true, reason: "First scheduled run" };
+  }
+  const elapsed = istDayNumber(now) - istDayNumber(new Date(input.lastRunAt));
+  if (elapsed >= frequency) return { run: true, reason: `${elapsed} days since last run` };
+  return { run: false, reason: `Next run in ${frequency - elapsed} day(s)` };
+}
+function istDaysUntil(target, now = /* @__PURE__ */ new Date()) {
+  return istDayNumber(target) - istDayNumber(now);
 }
 
 // server/services/reminder.service.ts
@@ -8753,15 +9114,13 @@ async function processEffectivenessReviewReminders(now) {
       explicitEmails: employee?.email ? [employee.email] : void 0
     });
     if (recipients.length === 0) continue;
-    const includeManagement = bucket.overdue && needsManagementEscalation(-daysLeft * 24);
-    const managementCc = includeManagement ? await resolveRecipients({ complaintId: complaint._id, targetRoles: ["Management"] }) : [];
     const res = await sendTemplatedEmail({
       triggerEvent: "EFFECTIVENESS_REVIEW_DUE",
       recipients,
-      cc: managementCc,
-      excludeManagement: !includeManagement,
+      excludeManagement: true,
       dedupeKey: `EFFREV_${complaint._id}_${cycle}_${bucket.key}`,
       relatedComplaintId: complaint._id,
+      automated: { daysDelayed: bucket.overdue ? Math.max(0, -daysLeft) : 0 },
       data: {
         complaintNumber: complaint.number,
         customerName: complaint.customer || complaint.product || complaint.description?.slice(0, 80) || "Internal Issue",
@@ -8788,12 +9147,7 @@ async function processReminders() {
   let complaintRemindersSent = 0;
   let capaRemindersSent = 0;
   const now = /* @__PURE__ */ new Date();
-  const todayStr = now.toISOString().slice(0, 10);
-  const [escalationConfig, tatConfigDoc] = await Promise.all([
-    EscalationConfiguration.findOne({ company: null }).lean(),
-    TATConfiguration.findOne({ company: null }).lean()
-  ]);
-  const thresholds = escalationConfig?.reminderPercentages?.length ? escalationConfig.reminderPercentages : [...DEFAULT_REMINDER_PERCENTAGES];
+  const tatConfigDoc = await TATConfiguration.findOne({ company: null }).lean();
   const tatConfig = {
     ackHours: tatConfigDoc?.ackHours ?? DEFAULT_TAT_CONFIG.ackHours,
     containmentDays: tatConfigDoc?.containmentDays ?? DEFAULT_TAT_CONFIG.containmentDays,
@@ -8816,56 +9170,24 @@ async function processReminders() {
     const multiplier = complaint.priority?.tatMultiplier ?? 1;
     const stageDues = computeStageDueDates({ receivedAt: new Date(complaint.receivedAt).toISOString(), priorityMultiplier: multiplier }, tatConfig);
     const targetDate = stageDues[stage];
-    const receivedAt = new Date(complaint.receivedAt);
-    const totalDurationMs = Math.max(1, targetDate.getTime() - receivedAt.getTime());
-    const elapsedMs = now.getTime() - receivedAt.getTime();
-    const elapsedPct = Math.round(elapsedMs / totalDurationMs * 100);
-    const msUntilDue = targetDate.getTime() - now.getTime();
-    const hoursUntilDue = msUntilDue / (1e3 * 60 * 60);
-    for (const pct of thresholds) {
-      if (elapsedPct >= pct && elapsedPct < 100) {
-        const dedupeKey = `REMINDER_CMP_${complaint._id}_${stage}_${pct}`;
-        const recipients = await resolveRecipients({
-          complaintId: complaint._id,
-          targetRoles: ["Complaint Owner", "Coordinator"]
-        });
-        if (recipients.length > 0) {
-          const res = await sendTemplatedEmail({
-            triggerEvent: "TAT_REMINDER",
-            recipients,
-            dedupeKey,
-            relatedComplaintId: complaint._id,
-            data: {
-              complaintNumber: complaint.number,
-              thresholdPct: String(pct),
-              stage: stage.toUpperCase(),
-              dueDate: targetDate.toLocaleDateString("en-IN"),
-              ownerName: complaint.owner?.name || "Assigned Owner",
-              priority: complaint.priority?.name || "Standard",
-              actionUrl: `/complaints/${complaint._id}`
-            }
-          });
-          if (res.status === "sent") complaintRemindersSent++;
-        }
-      }
-    }
-    if (hoursUntilDue > 0 && hoursUntilDue <= tatConfig.dueSoonHours) {
-      const dedupeKey = `DUESOON_CMP_${complaint._id}_${stage}_${todayStr}`;
+    if (!isPastDueDay(targetDate, now) && istDaysUntil(targetDate, now) <= reminderLookaheadDays(now)) {
       const recipients = await resolveRecipients({
         complaintId: complaint._id,
         targetRoles: ["Complaint Owner", "Coordinator"]
       });
       if (recipients.length > 0) {
         const res = await sendTemplatedEmail({
-          triggerEvent: "TAT_DUE_SOON",
+          triggerEvent: "TAT_REMINDER",
           recipients,
-          dedupeKey,
+          dedupeKey: `PREDUE_CMP_${complaint._id}_${stage}`,
           relatedComplaintId: complaint._id,
+          automated: { daysDelayed: 0 },
           data: {
             complaintNumber: complaint.number,
+            thresholdPct: "100",
             stage: stage.toUpperCase(),
-            hoursLeft: String(Math.max(1, Math.round(hoursUntilDue))),
             dueDate: targetDate.toLocaleDateString("en-IN"),
+            ownerName: complaint.owner?.name || "Assigned Owner",
             priority: complaint.priority?.name || "Standard",
             actionUrl: `/complaints/${complaint._id}`
           }
@@ -8876,14 +9198,12 @@ async function processReminders() {
   }
   const openCapas = await Capa.find({
     status: { $nin: ["Closed", "Completed", "Under Verification"] }
-  }).populate("owner", "name email").populate("complaint", "number").lean();
+  }).populate("owner", "name email").populate("ownerEmployee", "name email").populate("complaint", "number").lean();
   for (const capa of openCapas) {
     if (!capa.dueDate) continue;
     const targetDate = new Date(capa.dueDate);
-    const msUntilDue = targetDate.getTime() - now.getTime();
-    const daysUntilDue = Math.round(msUntilDue / (1e3 * 60 * 60 * 24));
-    if (daysUntilDue >= 0 && daysUntilDue <= 3) {
-      const dedupeKey = `REMINDER_CAPA_${capa._id}_${todayStr}`;
+    if (!isPastDueDay(targetDate, now) && istDaysUntil(targetDate, now) <= reminderLookaheadDays(now)) {
+      const dedupeKey = `PREDUE_CAPA_${capa._id}`;
       const recipients = await resolveRecipients({
         capaId: capa._id,
         targetRoles: ["CAPA Owner"]
@@ -8894,11 +9214,12 @@ async function processReminders() {
           recipients,
           dedupeKey,
           relatedCapaId: capa._id,
+          automated: { daysDelayed: 0 },
           data: {
             capaNumber: capa.number,
             capaTitle: capa.action || "Corrective Action",
             targetDate: targetDate.toLocaleDateString("en-IN"),
-            assignedTo: capa.owner?.name || "CAPA Owner",
+            assignedTo: capa.ownerEmployee?.name || capa.owner?.name || "CAPA Owner",
             actionUrl: `/capa/tracker`
           }
         });
@@ -8998,24 +9319,56 @@ async function processMonthlySummaries() {
   return { sent };
 }
 
+// server/services/email-schedule.service.ts
+async function claimScheduledRun(job) {
+  await connectDB();
+  const config = await EscalationConfiguration.findOne({ company: null }).lean();
+  const enabled = config?.autoEmailEnabled ?? true;
+  if (job === "reminders") {
+    if (enabled && isSunday(/* @__PURE__ */ new Date())) return { run: false, reason: "No automatic emails on Sunday" };
+    return enabled ? { run: true, reason: "Daily due-date reminder check" } : { run: false, reason: "Automatic emails are switched off" };
+  }
+  const lastRunAt = config?.lastEscalationRunAt ?? null;
+  const decision = shouldRunScheduledEmails({ enabled, frequencyDays: config?.frequencyDays ?? 7, lastRunAt });
+  if (!decision.run) return decision;
+  try {
+    const claimed = await EscalationConfiguration.findOneAndUpdate(
+      { company: null, lastEscalationRunAt: lastRunAt },
+      { $set: { lastEscalationRunAt: /* @__PURE__ */ new Date() } },
+      { upsert: true, new: true }
+    );
+    if (!claimed) return { run: false, reason: "Another run already claimed this slot" };
+  } catch {
+    return { run: false, reason: "Another run already claimed this slot" };
+  }
+  return decision;
+}
+
 // server/routes/cron.routes.ts
 var cronRouter = Router14();
 cronRouter.use(requireCronAuth);
-function schedule(path, handler2) {
+function schedule(path, handler2, gateJob) {
   const wrapped = asyncHandler(async (req, res) => {
     await handler2(req, res);
   });
-  cronRouter.get(path, wrapped);
+  const gated = asyncHandler(async (req, res) => {
+    if (gateJob) {
+      const decision = await claimScheduledRun(gateJob);
+      if (!decision.run) return ok(res, { job: gateJob, skipped: true, reason: decision.reason, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+    }
+    await handler2(req, res);
+  });
+  cronRouter.get(path, gated);
   cronRouter.post(path, wrapped);
 }
 schedule("/reminders", async (_req, res) => {
   const result = await processReminders();
   return ok(res, { job: "reminders", ...result, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
-});
+}, "reminders");
 schedule("/escalations", async (_req, res) => {
   const result = await processEscalations();
   return ok(res, { job: "escalations", ...result, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
-});
+}, "escalations");
 schedule("/summaries", async (_req, res) => {
   const result = await processMonthlySummaries();
   return ok(res, { job: "summaries", sent: result.sent, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
@@ -9023,7 +9376,7 @@ schedule("/summaries", async (_req, res) => {
 
 // server/routes/effectiveness.routes.ts
 import { Router as Router15 } from "express";
-import { z as z19 } from "zod";
+import { z as z20 } from "zod";
 
 // server/services/effectiveness.service.ts
 import { Types as Types12 } from "mongoose";
@@ -9159,17 +9512,17 @@ async function recordEffectivenessCheck(complaintId, input, user) {
 // server/routes/effectiveness.routes.ts
 var effectivenessRouter = Router15();
 effectivenessRouter.use(requireUser);
-var trackerQuery = z19.object({
-  page: z19.coerce.number().int().min(1).default(1),
-  pageSize: z19.coerce.number().int().min(1).max(100).default(25),
-  status: z19.enum(["Upcoming", "Due Soon", "Overdue"]).optional(),
-  search: z19.string().trim().max(160).optional(),
+var trackerQuery = z20.object({
+  page: z20.coerce.number().int().min(1).default(1),
+  pageSize: z20.coerce.number().int().min(1).max(100).default(25),
+  status: z20.enum(["Upcoming", "Due Soon", "Overdue"]).optional(),
+  search: z20.string().trim().max(160).optional(),
   company: objectIdSchema.optional()
 });
-var checkInput = z19.object({
-  result: z19.enum(EFFECTIVENESS_CHECK_RESULTS),
-  remarks: z19.string().trim().min(5, "Remarks are required (at least 5 characters)").max(2e3),
-  checkedAt: z19.coerce.date().optional()
+var checkInput = z20.object({
+  result: z20.enum(EFFECTIVENESS_CHECK_RESULTS),
+  remarks: z20.string().trim().min(5, "Remarks are required (at least 5 characters)").max(2e3),
+  checkedAt: z20.coerce.date().optional()
 });
 effectivenessRouter.get(
   "/",
@@ -9221,7 +9574,7 @@ function createApp() {
   app.use(express.json({ limit: "1mb" }));
   app.use(cookieParser(env.COOKIE_SECRET));
   app.use((req, res, next) => {
-    req.requestId = randomUUID();
+    req.requestId = randomUUID2();
     res.setHeader("X-Request-Id", req.requestId);
     next();
   });

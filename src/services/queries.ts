@@ -51,8 +51,8 @@ export type ConfigurationResponse = {
   complaintTypes: string[];
 };
 
-export function useConfiguration(company?: string) {
-  return useApiQuery<ConfigurationResponse>(["configuration", company ?? "all"], `/api/configuration${buildQuery({ company })}`, {
+export function useConfiguration(company?: string, view: "full" | "basic" = "full") {
+  return useApiQuery<ConfigurationResponse>(["configuration", company ?? "all", view], `/api/configuration${buildQuery({ company, view: view === "basic" ? "basic" : undefined })}`, {
     staleTime: 5 * 60 * 1000
   });
 }
@@ -77,8 +77,8 @@ export type MasterBootstrap = {
   }[];
 };
 
-export function useMasterBootstrap() {
-  return useApiQuery<MasterBootstrap>(["master", "bootstrap"], "/api/master/bootstrap", { staleTime: 5 * 60 * 1000 });
+export function useMasterBootstrap(include: "reference" | "employees" | "full" = "reference") {
+  return useApiQuery<MasterBootstrap>(["master", "bootstrap", include], `/api/master/bootstrap${buildQuery({ include })}`, { staleTime: 5 * 60 * 1000 });
 }
 
 export function useSystemUsers(enabled = true) {
@@ -87,11 +87,11 @@ export function useSystemUsers(enabled = true) {
 
 export type AssignableUser = { id: string; name: string; username: string; email: string; role: string };
 
-export function useAssignableUsers(company?: string) {
+export function useAssignableUsers(company?: string, enabled = true) {
   return useApiQuery<{ users: AssignableUser[]; employees?: { id: string; name: string; designation: string }[] }>(
     ["assignable-users", company ?? "all"],
     `/api/analytics/assignable-users${buildQuery({ company })}`,
-    { staleTime: 5 * 60 * 1000 }
+    { staleTime: 5 * 60 * 1000, enabled }
   );
 }
 
@@ -274,9 +274,11 @@ export type ComplaintDetail = {
   repeatBasis?: string;
   repeatOf?: { complaint: string; number?: string; basis?: string[] }[];
   company?: string;
+  companyName?: string;
   priority?: string;
   owner?: string;
   ownerEmployee?: string;
+  relatedEmails?: string[];
   priorityName?: string;
   internalDeptName?: string;
   againstDeptName?: string;

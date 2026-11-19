@@ -29,7 +29,6 @@ import {
   issuesFrom,
   useApiMutation,
   useComplaintDetail,
-  useMasterBootstrap,
   usePermissions,
   type ApiIssue,
   type ComplaintDetail
@@ -62,7 +61,6 @@ export function ComplaintDetailPage() {
   const navigate = useNavigate();
   const toast = useToast();
   const permissions = usePermissions();
-  const master = useMasterBootstrap();
 
   const [activeTab, setActiveTab] = useState<TabKey>("overview");
   const [downloadingPdf, setDownloadingPdf] = useState(false);
@@ -94,8 +92,8 @@ export function ComplaintDetailPage() {
   const detailQuery = useComplaintDetail(id);
   const data = detailQuery.data;
   const complaint = data?.complaint;
-  const capas = data?.capas ?? [];
-  const tat = data?.tat ?? [];
+  const capas = useMemo(() => data?.capas ?? [], [data?.capas]);
+  const tat = useMemo(() => data?.tat ?? [], [data?.tat]);
   const canEdit = Boolean(data?.permissions?.canEdit);
   const canClose = Boolean(data?.permissions?.canClose);
   const canDelete = Boolean(data?.permissions?.canDelete && permissions.isMasterAdmin);
@@ -133,16 +131,6 @@ export function ComplaintDetailPage() {
       d6: ""
     };
   }, [tat]);
-
-  const companyObj = useMemo(() => {
-    if (!complaint?.company) return null;
-    return master.data?.companies.find((c) => c._id === complaint.company);
-  }, [complaint?.company, master.data?.companies]);
-
-  const deptObj = useMemo(() => {
-    if (!complaint?.responsibleDept) return null;
-    return master.data?.departments.find((d) => d._id === complaint.responsibleDept);
-  }, [complaint?.responsibleDept, master.data?.departments]);
 
   if (detailQuery.isLoading) {
     return (
@@ -306,7 +294,7 @@ export function ComplaintDetailPage() {
       {/* Top Breadcrumb & Actions Bar */}
       <PageHeader
         title={complaint.number}
-        description={`Registered on ${formatDate(complaint.receivedAt)} • ${complaint.type} Complaint • Company: ${companyObj?.name ?? complaint.company ?? "—"}`}
+        description={`Registered on ${formatDate(complaint.receivedAt)} • ${complaint.type} Complaint • Company: ${complaint.companyName ?? complaint.company ?? "—"}`}
         breadcrumb={
           <div className="flex items-center gap-1.5">
             <Link to="/complaints" className="hover:text-brand-red hover:underline">
@@ -442,7 +430,7 @@ export function ComplaintDetailPage() {
         <div>
           <span className="text-slate-400 block font-medium">Responsible Dept</span>
           <span className="font-semibold text-slate-800 text-sm mt-0.5 block truncate">
-            {complaint.responsibleDeptName ?? deptObj?.name ?? complaint.againstDeptName ?? "—"}
+            {complaint.responsibleDeptName ?? complaint.againstDeptName ?? "—"}
           </span>
         </div>
         <div>

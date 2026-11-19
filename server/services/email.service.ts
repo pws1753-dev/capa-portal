@@ -10,6 +10,7 @@ import { hasDedupeKeyBeenSent, writeEmailLog, getEmailLogById, getThreadHistory 
 import { getEmailRouting, withoutExcluded } from "./email-routing.service";
 import { applyReminderBanner, buildReminderBanner, nextReminderCount, threadSubject } from "../domain/email-thread";
 import { Capa } from "../models/Capa";
+import { Complaint } from "../models/Complaint";
 import { randomUUID } from "node:crypto";
 import { EmailLog } from "../models/EmailLog";
 import { httpError } from "../utils/http";
@@ -96,7 +97,22 @@ function newMessageId(): string {
   return `<${randomUUID()}@${domain}>`;
 }
 
+/** Addresses attached to a complaint are copied on every email in that complaint's thread, including CAPA emails. */
+async function complaintRelatedEmails(input: Pick<SendTemplatedEmailInput, "relatedComplaintId" | "relatedCapaId">): Promise<string[]> {
+  let complaintId = input.relatedComplaintId;
+  if (!complaintId && input.relatedCapaId) {
+    const capa = await Capa.findById(input.relatedCapaId).select("complaint").lean().catch(() => null);
+    complaintId = capa?.complaint;
+  }
+  if (!complaintId) return [];
+  const complaint = await Complaint.findById(complaintId).select("relatedEmails").lean().catch(() => null);
+  return Array.isArray(complaint?.relatedEmails) ? complaint.relatedEmails : [];
+}
+
 export async function sendTemplatedEmail(input: SendTemplatedEmailInput): Promise<SendEmailResult> {
+  const relatedEmails = await complaintRelatedEmails(input);
+  if (relatedEmails.length > 0) input = { ...input, cc: [...(input.cc ?? []), ...relatedEmails] };
+
   // Portal emails are internal only: a customer or any outside address is dropped before anything is sent.
   const toPolicy = splitByEmailPolicy(input.recipients);
   const ccPolicy = splitByEmailPolicy(input.cc);

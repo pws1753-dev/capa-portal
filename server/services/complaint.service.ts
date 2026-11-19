@@ -12,6 +12,7 @@ import type { DomainActor, DomainComplaint } from "../domain/types";
 import { delayGaps, stageGaps, stageSequenceGaps, type Gap } from "../domain/workflow";
 import { Capa } from "../models/Capa";
 import { Complaint, type ComplaintHydrated } from "../models/Complaint";
+import { Company } from "../models/Company";
 import { Department } from "../models/Department";
 import { ComplaintNote } from "../models/ComplaintNote";
 import { EffectivenessCheck } from "../models/EffectivenessCheck";
@@ -125,6 +126,7 @@ export async function createComplaint(input: ComplaintCreateInput, user: ApiUser
     description: input.description,
     owner: input.owner ?? actor.id,
     ownerEmployee: ownerEmployee?._id,
+    relatedEmails: input.relatedEmails,
     createdBy: actor.id,
     workflowLog: [{ stage: "Registered", at: new Date(), by: actor.id, byName: actor.name, notes: "Complaint registered" }]
   });
@@ -202,9 +204,10 @@ export async function createComplaint(input: ComplaintCreateInput, user: ApiUser
     explicitEmails: (await getEmailRouting()).commonCc
   });
   if (emailRecipients.length > 0) {
-    const [ownerUser, responsibleDepartment] = await Promise.all([
+    const [ownerUser, responsibleDepartment, priority] = await Promise.all([
       doc.owner ? User.findById(doc.owner).select("name email").lean() : null,
-      doc.responsibleDept ? Department.findById(doc.responsibleDept).select("name").lean() : null
+      doc.responsibleDept ? Department.findById(doc.responsibleDept).select("name").lean() : null,
+      doc.priority ? Priority.findById(doc.priority).select("name").lean() : null
     ]);
     const cc = emailCc.filter((email) => !emailRecipients.includes(email));
 
@@ -222,7 +225,7 @@ export async function createComplaint(input: ComplaintCreateInput, user: ApiUser
         customerName: doc.customer || "Internal Issue",
         partName: doc.product || "Component",
         partNumber: "N/A",
-        priority: String(doc.priority || "Standard"),
+        priority: priority?.name ?? "Standard",
         departmentName: responsibleDepartment?.name ?? "",
         coordinatorName: actor.name,
         ackDueDate: "Within 24h",
@@ -403,6 +406,7 @@ export async function listComplaints(query: ComplaintListQuery, user: ApiUser | 
   if (query.category) filter.category = query.category;
   if (query.responsibleDept) filter.responsibleDept = new Types.ObjectId(query.responsibleDept);
   if (query.owner) filter.owner = new Types.ObjectId(query.owner);
+  if (query.ownerEmployee) filter.ownerEmployee = new Types.ObjectId(query.ownerEmployee);
   if (typeof query.isRepeat === "boolean") filter.isRepeat = query.isRepeat;
   if (query.receivedFrom || query.receivedTo) {
     const receivedTo = query.receivedTo ? new Date(query.receivedTo) : undefined;
@@ -444,12 +448,13 @@ export async function getComplaintDetail(complaintId: string, user: ApiUser | un
   const { priority, internalDept, againstDept, responsibleDept } = context.doc;
   const closedAt = context.doc.closedAt;
   // Everything the page needs is read in one round trip instead of one after another.
-  const [tatConfig, capas, ownerUser, ownerEmployee, priorityDoc, departments, checksDone] = await Promise.all([
+  const [tatConfig, capas, ownerUser, ownerEmployee, priorityDoc, companyDoc, departments, checksDone] = await Promise.all([
     resolveTatConfig(context.doc.company),
     Capa.find({ complaint: context.doc._id }).populate("owner", "name").populate("ownerEmployee", "name").sort({ sequence: 1 }).lean(),
     context.doc.owner ? User.findById(context.doc.owner).select("name").lean() : null,
     context.doc.ownerEmployee ? Employee.findById(context.doc.ownerEmployee).select("name").lean() : null,
     priority ? Priority.findById(priority).select("name").lean() : null,
+    Company.findById(context.doc.company).select("name code").lean(),
     Department.find({ _id: { $in: [internalDept, againstDept, responsibleDept].filter(Boolean) } }).select("name").lean(),
     // A closed complaint is re-checked every six months; the next check follows the ones already recorded.
     closedAt ? EffectivenessCheck.countDocuments({ complaint: context.doc._id, closedAt }) : 0
@@ -460,6 +465,7 @@ export async function getComplaintDetail(complaintId: string, user: ApiUser | un
       ...context.doc.toObject(),
       // The stored references are ids; the page shows these resolved names instead of raw ids.
       priorityName: priorityDoc?.name,
+      companyName: companyDoc?.name,
       internalDeptName: departmentName(internalDept),
       againstDeptName: departmentName(againstDept),
       responsibleDeptName: departmentName(responsibleDept),

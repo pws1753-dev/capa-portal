@@ -15,13 +15,14 @@ import { formatDate, statusTone } from "@/lib/format";
 import { fetchAllPages } from "@/lib/api";
 import {
   useComplaints,
+  useAssignableUsers,
   useConfiguration,
   useMasterBootstrap,
   usePermissions,
   type ComplaintListItem
 } from "@/services/queries";
 
-const FILTER_KEYS = ["type", "status", "priority", "category", "responsibleDept", "company", "isRepeat", "search", "receivedFrom", "receivedTo"] as const;
+const FILTER_KEYS = ["type", "status", "priority", "category", "responsibleDept", "company", "owner", "ownerEmployee", "isRepeat", "search", "receivedFrom", "receivedTo"] as const;
 
 /** Internal complaints are tinted amber and external ones sky blue in the complaint register. */
 const isInternal = (type?: string) => type?.toLowerCase() === "internal";
@@ -35,7 +36,8 @@ export function ComplaintsListPage() {
   const queryString = params.toString();
   const [searchDraft, setSearchDraft] = useState(urlSearch);
   const master = useMasterBootstrap();
-  const configuration = useConfiguration();
+  const configuration = useConfiguration(undefined, "basic");
+  const [ownerOptionsEnabled, setOwnerOptionsEnabled] = useState(Boolean(params.get("owner") || params.get("ownerEmployee")));
 
   const query = useMemo(() => {
     const entries: Record<string, string | number> = {
@@ -52,6 +54,8 @@ export function ComplaintsListPage() {
   }, [params]);
 
   const { data, isLoading, error } = useComplaints(query);
+  // Fetch the heavier owner directory only after the complaint rows are visible (or immediately for a shared owner-filter URL).
+  const assignable = useAssignableUsers(params.get("company") ?? undefined, ownerOptionsEnabled || Boolean(data));
 
   useEffect(() => {
     setSearchDraft(urlSearch);
@@ -80,6 +84,16 @@ export function ComplaintsListPage() {
 
   function clearFilters() {
     const next = new URLSearchParams();
+    next.set("page", "1");
+    setParams(next, { replace: true });
+  }
+
+  function setOwnerFilter(value: string) {
+    const next = new URLSearchParams(params);
+    next.delete("owner");
+    next.delete("ownerEmployee");
+    if (value.startsWith("emp:")) next.set("ownerEmployee", value.slice(4));
+    else if (value) next.set("owner", value);
     next.set("page", "1");
     setParams(next, { replace: true });
   }
@@ -290,6 +304,30 @@ export function ComplaintsListPage() {
               <Select value={params.get("isRepeat") ?? ""} onChange={(event) => setParam("isRepeat", event.target.value)}>
                 <option value="">All complaints</option>
                 <option value="true">Repeat complaints only</option>
+              </Select>
+            </Field>
+            <Field label="Owner">
+              <Select
+                value={params.get("ownerEmployee") ? `emp:${params.get("ownerEmployee")}` : (params.get("owner") ?? "")}
+                onFocus={() => setOwnerOptionsEnabled(true)}
+                onChange={(event) => setOwnerFilter(event.target.value)}
+              >
+                <option value="">All owners</option>
+                {ownerOptionsEnabled && assignable.isLoading ? <option disabled>Loading owners...</option> : null}
+                {(assignable.data?.users ?? []).map((user) => (
+                  <option key={user.id} value={user.id}>
+                    {user.name}
+                  </option>
+                ))}
+                {(assignable.data?.employees ?? []).length > 0 ? (
+                  <optgroup label="Employee Directory">
+                    {(assignable.data?.employees ?? []).map((employee) => (
+                      <option key={employee.id} value={`emp:${employee.id}`}>
+                        {employee.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                ) : null}
               </Select>
             </Field>
             <Field label="Received from">

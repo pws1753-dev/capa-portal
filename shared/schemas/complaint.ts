@@ -13,6 +13,10 @@ import {
 import { listQuerySchema, objectIdSchema } from "./common";
 
 const optionalText = (max: number) => z.string().trim().max(max).optional().default("");
+const relatedEmailsSchema = z
+  .array(z.string().trim().email("Enter a valid related person email address").transform((email) => email.toLowerCase()))
+  .max(30, "A complaint can have at most 30 related email addresses")
+  .transform((emails) => Array.from(new Set(emails)));
 
 const baseComplaintSchema = z.object({
   type: z.enum(COMPLAINT_TYPES),
@@ -39,6 +43,7 @@ const baseComplaintSchema = z.object({
   description: z.string().trim().min(10, "Describe the complaint in at least 10 characters").max(5000),
   owner: objectIdSchema.optional(),
   ownerEmployee: objectIdSchema.optional(),
+  relatedEmails: relatedEmailsSchema.default([]),
   attachments: z.array(objectIdSchema).max(20).default([])
 });
 
@@ -85,6 +90,7 @@ export const complaintListQuerySchema = listQuerySchema.extend({
   category: z.string().trim().max(120).optional(),
   responsibleDept: objectIdSchema.optional(),
   owner: objectIdSchema.optional(),
+  ownerEmployee: objectIdSchema.optional(),
   isRepeat: z.coerce.boolean().optional(),
   tat: z.enum(["on-time", "due-soon", "overdue"]).optional(),
   receivedFrom: z.coerce.date().optional(),
@@ -124,6 +130,7 @@ const fishboneSchema = z.object(
 );
 
 export const eightDSchema = z.object({
+  relatedEmails: relatedEmailsSchema.optional(),
   d0: z.string().trim().max(4000).optional(),
   d1Team: z
     .array(
@@ -199,6 +206,7 @@ export const eightDSchema = z.object({
 
 /** Internal complaints keep a reduced investigation instead of the full 8D interface. */
 export const internalInvestigationSchema = z.object({
+  relatedEmails: relatedEmailsSchema.optional(),
   /** Immediate response and interim containment: required to acknowledge and to complete containment. */
   d0: z.string().trim().max(4000).optional(),
   d3Actions: z.array(actionRowSchema).max(50).optional(),
